@@ -23,7 +23,12 @@ from pathlib import Path
 
 import pandas as pd
 
-from .arms import MIN_CELLS_TO_SUBSAMPLE, SUBSAMPLE_SEP, build_augmented_adata
+from .arms import (
+    MIN_CELLS_TO_SUBSAMPLE,
+    N_CONTROL_CELLS,
+    SUBSAMPLE_SEP,
+    build_augmented_adata,
+)
 
 HERE = Path(__file__).resolve().parent
 PIPELINE = HERE / "RunAshrPipeline.sh"
@@ -59,6 +64,7 @@ def generate_posterior_matrices(
     control_label: str = "non-targeting",
     n_subsamples: int = 1,
     min_cells_to_subsample: int = MIN_CELLS_TO_SUBSAMPLE,
+    n_control_cells: int = N_CONTROL_CELLS,
     seed: int = 0,
     permute: bool = False,
     permute_seed: int = 0,
@@ -85,9 +91,15 @@ def generate_posterior_matrices(
         is ``context`` (plus ``_permuted_seed<k>`` for the null arm).
     n_subsamples
         Subsamples per eligible perturbation. Perturbations with more than
-        ``min_cells_to_subsample`` cells get ``n`` drawn uniformly from
-        ``[min_cells_to_subsample, n_cells]``; the rest contribute only their
+        ``min_cells_to_subsample`` cells get ``n`` drawn uniformly at random
+        from ``[min_cells_to_subsample, n_cells]``, with the cells themselves
+        drawn uniformly without replacement; the rest contribute only their
         full row.
+    n_control_cells
+        Size of the fixed control set for this context, shared by every row
+        (full and subsampled alike). Defaults to 10,000. Controls beyond this
+        are dropped, so the ``var_c / n_ctrl`` term of the standard error is
+        identical across rows and comparable across contexts.
     permute
         Build the label-permuted null instead: perturbation labels are shuffled
         among perturbed cells, controls untouched, cell counts preserved.
@@ -132,6 +144,7 @@ def generate_posterior_matrices(
         label_key=label_key,
         n_subsamples=n_subsamples,
         min_cells_to_subsample=min_cells_to_subsample,
+        n_control_cells=n_control_cells,
         seed=seed,
         permute=permute,
         permute_seed=permute_seed,
@@ -196,6 +209,7 @@ def generate_posterior_matrices(
         "control_label": control_label,
         "n_subsamples": n_subsamples,
         "min_cells_to_subsample": min_cells_to_subsample,
+        "n_control_cells": n_control_cells,
         "seed": seed,
         "min_cells": min_cells,
         "chunk_perts": chunk_perts,

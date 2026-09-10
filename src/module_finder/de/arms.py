@@ -21,11 +21,22 @@ subsampled rows' different precisions in a single prior.
 
 Subsampling rule: a perturbation is subsampled only if it has more than
 ``min_cells_to_subsample`` (50) cells in that context, and then ``n`` is drawn
-uniformly from ``[50, n_cells]``. Perturbations at or below the floor
-contribute their full row only.
+uniformly at random from ``[50, n_cells]`` and the cells themselves are drawn
+uniformly without replacement. Perturbations at or below the floor contribute
+their full row only.
+
+Control rule: a **fixed** set of ``n_control_cells`` (default 10,000) control
+cells is drawn once per context and shared by every row -- the full estimates
+and the subsampled ones alike. ``ComputeSE.py`` computes the control mean and
+variance once before its per-label loop, so one control group necessarily
+serves all labels; fixing its size makes the ``var_c / n_ctrl`` term of the
+standard error identical across rows and comparable across contexts. Control
+cells beyond that number are dropped from the augmented object.
 """
 
 from __future__ import annotations
+
+import warnings
 
 import numpy as np
 import pandas as pd
@@ -36,48 +47,86 @@ SUBSAMPLE_SEP = "__sub"
 #: Perturbations with more cells than this are eligible for subsampling.
 MIN_CELLS_TO_SUBSAMPLE = 50
 
+#: Control cells used per context, fixed and shared by every row.
+N_CONTROL_CELLS = 10_000
+
 
 def plan_augmentation(
     perturbations: np.ndarray,
     control_label: str,
     n_subsamples: int = 1,
     min_cells_to_subsample: int = MIN_CELLS_TO_SUBSAMPLE,
+    n_control_cells: int = N_CONTROL_CELLS,
     seed: int = 0,
 ) -> tuple[np.ndarray, np.ndarray, pd.DataFrame]:
     """Plan the augmented cell list for one context.
 
+    Parameters
+    ----------
+    n_control_cells
+        Size of the fixed control set. Drawn once, uniformly without
+        replacement, and shared by every row. If the context has fewer control
+        cells than this, all of them are used and a warning is issued -- the
+        control-side precision is then lower than requested and not comparable
+        with contexts that met the target.
+
     Returns
     -------
     cell_index
-        Indices into the original object, with subsampled cells repeated.
+        Indices into the original object: the fixed control set, every
+        perturbed cell (for the full rows), and the subsampled cells repeated.
+        Control cells outside the fixed set do not appear.
     labels
         The ``adata.obs`` label for each entry of ``cell_index``.
     plan
         One row per output row of the eventual matrix: ``label, perturbation,
         variant, subsample, n_cells_planned``. ``n_cells_planned`` is the ``n``
-        drawn for a subsample, or the full count for a full row.
+        drawn for a subsample, the full count for a full row, and the fixed
+        control-set size for the control row.
     """
     perturbations = np.asarray(perturbations).astype(str)
     rng = np.random.default_rng(seed)
 
-    cell_index = [np.arange(len(perturbations))]
-    labels = [perturbations.copy()]
+    cell_index: list[np.ndarray] = []
+    labels: list[np.ndarray] = []
     rows = []
 
-    for pert in np.unique(perturbations):
-        idx = np.flatnonzero(perturbations == pert)
-        if pert == control_label:
-            rows.append(
-                {
-                    "label": pert,
-                    "perturbation": pert,
-                    "variant": "control",
-                    "subsample": -1,
-                    "n_cells_planned": len(idx),
-                }
+    # ---- the fixed control set, drawn once and shared by every row ----
+    control_idx = np.flatnonzero(perturbations == control_label)
+    if len(control_idx) == 0:
+        raise ValueError(f"no cells labelled {control_label!r}")
+    if len(control_idx) <= n_control_cells:
+        if len(control_idx) < n_control_cells:
+            warnings.warn(
+                f"only {len(control_idx)} control cells available, fewer than the "
+                f"requested {n_control_cells}; using all of them. Control-side "
+                "precision is lower than requested and not comparable with "
+                "contexts that met the target.",
+                stacklevel=2,
             )
-            continue
+        chosen_control = control_idx
+    else:
+        chosen_control = rng.choice(control_idx, size=n_control_cells, replace=False)
+    cell_index.append(chosen_control)
+    labels.append(np.full(len(chosen_control), control_label))
+    rows.append(
+        {
+            "label": control_label,
+            "perturbation": control_label,
+            "variant": "control",
+            "subsample": -1,
+            "n_cells_planned": len(chosen_control),
+        }
+    )
 
+    for pert in np.unique(perturbations):
+        if pert == control_label:
+            continue
+        idx = np.flatnonzero(perturbations == pert)
+
+        # full row: every cell this perturbation has in this context
+        cell_index.append(idx)
+        labels.append(np.full(len(idx), pert))
         rows.append(
             {
                 "label": pert,
@@ -121,6 +170,7 @@ def build_augmented_adata(
     label_key: str = "mf_label",
     n_subsamples: int = 1,
     min_cells_to_subsample: int = MIN_CELLS_TO_SUBSAMPLE,
+    n_control_cells: int = N_CONTROL_CELLS,
     seed: int = 0,
     permute: bool = False,
     permute_seed: int = 0,
@@ -139,9 +189,9 @@ def build_augmented_adata(
     -------
     (adata_augmented, plan)
         ``adata_augmented.obs[label_key]`` is what to pass to ``ComputeSE.py``
-        as ``--group-key``. Control cells are never duplicated: the full and
-        subsampled rows share one baseline, exactly as in the original
-        pipeline.
+        as ``--group-key``. The control set is fixed at ``n_control_cells``,
+        drawn once and shared by every row; controls are never duplicated and
+        any beyond that number are dropped.
     """
     perturbations = adata.obs[perturbation_key].astype(str).to_numpy()
 
@@ -156,6 +206,7 @@ def build_augmented_adata(
         control_label=control_label,
         n_subsamples=n_subsamples,
         min_cells_to_subsample=min_cells_to_subsample,
+        n_control_cells=n_control_cells,
         seed=seed,
     )
 

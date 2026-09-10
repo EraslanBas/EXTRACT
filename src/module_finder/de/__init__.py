@@ -37,6 +37,7 @@ any differential expression:
 from .api import PosteriorRun, generate_posterior_matrices
 from .arms import (
     MIN_CELLS_TO_SUBSAMPLE,
+    N_CONTROL_CELLS,
     SUBSAMPLE_SEP,
     build_augmented_adata,
     plan_augmentation,
@@ -49,4 +50,5 @@ __all__ = [
     "plan_augmentation",
     "SUBSAMPLE_SEP",
     "MIN_CELLS_TO_SUBSAMPLE",
+    "N_CONTROL_CELLS",
 ]
