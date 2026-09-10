@@ -1,0 +1,1 @@
+conditions=list("CHIR", "DMSO", "KYA", "LDN", "PFI1", "RGFP", "AR-A014418", "AZD4573", "CHIR-98014", "DMSO_round2", "Lexibulin", "PP121", "Romidepsin", "Stattic")

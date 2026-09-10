@@ -1,0 +1,37 @@
+# ---- Large data artifacts (kept on disk, never in git) ----
+data/
+results/
+de_benchmark/
+SRC/DATA/
+SRC/results/
+SRC/tmp/
+SRC/DE_experiments/
+MOFA/
+
+# ---- Vendored third-party clones (have their own .git) ----
+external/
+MuVI/
+SRC/ashr/
+
+# ---- Binary / heavy formats ----
+*.h5ad
+*.hdf5
+*.h5
+*.pkl
+*.parquet
+*.npy
+*.npz
+SRC/SimulatedData_degs_sf.csv
+
+# ---- Python ----
+__pycache__/
+*.py[cod]
+.ipynb_checkpoints/
+*.egg-info/
+build/
+dist/
+.venv/
+
+# ---- Downloadable reference data (NCBI/GO) ----
+SRC/go_data/
+reference/go_data/
