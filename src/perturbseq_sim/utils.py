@@ -1,6 +1,6 @@
 import numpy as np
 from sklearn.linear_model import LinearRegression
-from libraries import *
+from .libraries import *
 
 def sample_adata(adata, frac=0.4, random_state=0):
     """

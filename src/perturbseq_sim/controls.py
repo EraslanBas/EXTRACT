@@ -1,8 +1,8 @@
-from libraries import *
-from parameters import *
-from util import *
-from GetGOPrograms import *
-from GenerateGRN import *
+from .libraries import *
+from .config import *
+from .utils import *
+from .programs import *
+from .grn import *
 from matplotlib.patches import Rectangle, Circle, FancyArrowPatch
 import matplotlib.patches as mpatches
 from typing import Dict, List, Set

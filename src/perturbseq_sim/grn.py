@@ -1,7 +1,7 @@
-from libraries import *
-from parameters import *
-from util import *
-from GetGOPrograms import *
+from .libraries import *
+from .config import *
+from .utils import *
+from .programs import *
 
 import numpy as np
 import pandas as pd

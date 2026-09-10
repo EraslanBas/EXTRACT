@@ -1,5 +1,5 @@
-from libraries import *
-from GenerateGRN import *
+from .libraries import *
+from .grn import *
 
 import numpy as np
 import pandas as pd
