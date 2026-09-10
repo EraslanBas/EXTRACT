@@ -41,6 +41,7 @@ from .arms import (
     SUBSAMPLE_SEP,
     build_augmented_adata,
     plan_augmentation,
+    subsample_sizes,
 )
 
 __all__ = [
@@ -48,6 +49,7 @@ __all__ = [
     "PosteriorRun",
     "build_augmented_adata",
     "plan_augmentation",
+    "subsample_sizes",
     "SUBSAMPLE_SEP",
     "MIN_CELLS_TO_SUBSAMPLE",
     "N_CONTROL_CELLS",

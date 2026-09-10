@@ -20,10 +20,18 @@ place for it, since ashr conditions on ``se`` and so handles the full and
 subsampled rows' different precisions in a single prior.
 
 Subsampling rule: a perturbation is subsampled only if it has more than
-``min_cells_to_subsample`` (50) cells in that context, and then ``n`` is drawn
-uniformly at random from ``[50, n_cells]`` and the cells themselves are drawn
-uniformly without replacement. Perturbations at or below the floor contribute
-their full row only.
+``min_cells_to_subsample`` (50) cells in that context. Its ``n_subsamples``
+sizes then **span** ``[50, n_cells]`` rather than being drawn at random, so the
+requested number of subsamples covers the range as evenly as it can, endpoints
+included. Which cells go into each subsample is still random (uniform, without
+replacement) -- the randomness is kept where it belongs and removed from the
+coverage.
+
+Sizes stop just short of ``n_cells`` because the full row already provides
+that estimate; the subsamples and the full row together span the range. Sizes
+are rounded and de-duplicated, so a perturbation whose range is narrower than
+``n_subsamples`` yields fewer than requested -- there is no way to get five
+distinct sizes out of a 51-cell perturbation.
 
 Control rule: a **fixed** set of ``n_control_cells`` (default 10,000) control
 cells is drawn once per context and shared by every row -- the full estimates
@@ -51,18 +59,74 @@ MIN_CELLS_TO_SUBSAMPLE = 50
 N_CONTROL_CELLS = 10_000
 
 
+def subsample_sizes(
+    n_cells: int,
+    n_subsamples: int,
+    min_cells_to_subsample: int = MIN_CELLS_TO_SUBSAMPLE,
+    spacing: str = "linear",
+) -> list[int]:
+    """``n_subsamples`` sizes spanning ``[min_cells_to_subsample, n_cells)``.
+
+    The **full row already sits at** ``n_cells``, so the subsample sizes stop
+    just short of it: a subsample of size ``n_cells`` would draw every cell and
+    reproduce the full estimate exactly, wasting a duplicate matrix row and
+    doubling the cells written for the largest perturbations. Together the
+    ``n_subsamples`` subsamples plus the full row cover
+    ``[min_cells_to_subsample, n_cells]`` end to end.
+
+    Concretely: ``n_subsamples + 1`` points are spread across the closed range
+    and the top one dropped, which is why the requested count is honoured
+    exactly (subject to de-duplication) rather than being reduced by one.
+
+    Parameters
+    ----------
+    spacing
+        ``"linear"`` spreads the sizes evenly in ``n`` -- even coverage of the
+        cell-count range. ``"log"`` spreads them geometrically, which gives
+        more even coverage of *precision*: the standard error scales as
+        ``1/sqrt(n)``, so linear spacing under-samples the low-``n`` end where
+        the estimate changes fastest. Prefer ``"log"`` when the point is to
+        characterise how the estimate degrades as cells are removed.
+
+    Returns
+    -------
+    Sorted distinct sizes, all ``>= min_cells_to_subsample`` and
+    ``< n_cells``. Empty if the perturbation is at or below the floor, or
+    ``n_subsamples <= 0``. Fewer than requested when the range cannot supply
+    that many distinct integers.
+    """
+    if n_subsamples <= 0 or n_cells <= min_cells_to_subsample:
+        return []
+    if spacing == "log":
+        raw = np.geomspace(min_cells_to_subsample, n_cells, n_subsamples + 1)
+    elif spacing == "linear":
+        raw = np.linspace(min_cells_to_subsample, n_cells, n_subsamples + 1)
+    else:
+        raise ValueError(f"spacing must be 'linear' or 'log', got {spacing!r}")
+    sizes = np.round(raw[:-1]).astype(int)
+    sizes = np.clip(sizes, min_cells_to_subsample, n_cells - 1)
+    return sorted(set(sizes.tolist()))
+
+
 def plan_augmentation(
     perturbations: np.ndarray,
     control_label: str,
     n_subsamples: int = 1,
     min_cells_to_subsample: int = MIN_CELLS_TO_SUBSAMPLE,
     n_control_cells: int = N_CONTROL_CELLS,
+    spacing: str = "linear",
     seed: int = 0,
 ) -> tuple[np.ndarray, np.ndarray, pd.DataFrame]:
     """Plan the augmented cell list for one context.
 
     Parameters
     ----------
+    n_subsamples
+        Subsamples requested per eligible perturbation. Their sizes span
+        ``[min_cells_to_subsample, n_cells]``; see :func:`subsample_sizes`.
+        Fewer are produced if the range cannot supply that many distinct sizes.
+    spacing
+        ``"linear"`` or ``"log"`` -- see :func:`subsample_sizes`.
     n_control_cells
         Size of the fixed control set. Drawn once, uniformly without
         replacement, and shared by every row. If the context has fewer control
@@ -139,9 +203,12 @@ def plan_augmentation(
         if len(idx) <= min_cells_to_subsample:
             continue
 
-        for k in range(n_subsamples):
-            # inclusive of both ends: n in [50, n_cells]
-            n = int(rng.integers(min_cells_to_subsample, len(idx) + 1))
+        for k, n in enumerate(
+            subsample_sizes(
+                len(idx), n_subsamples, min_cells_to_subsample, spacing
+            )
+        ):
+            # size is planned to span the range; which cells is still random
             chosen = rng.choice(idx, size=n, replace=False)
             label = f"{pert}{SUBSAMPLE_SEP}{k:02d}"
             cell_index.append(chosen)
@@ -171,6 +238,7 @@ def build_augmented_adata(
     n_subsamples: int = 1,
     min_cells_to_subsample: int = MIN_CELLS_TO_SUBSAMPLE,
     n_control_cells: int = N_CONTROL_CELLS,
+    spacing: str = "linear",
     seed: int = 0,
     permute: bool = False,
     permute_seed: int = 0,
@@ -207,6 +275,7 @@ def build_augmented_adata(
         n_subsamples=n_subsamples,
         min_cells_to_subsample=min_cells_to_subsample,
         n_control_cells=n_control_cells,
+        spacing=spacing,
         seed=seed,
     )
 

@@ -28,6 +28,7 @@ from .arms import (
     N_CONTROL_CELLS,
     SUBSAMPLE_SEP,
     build_augmented_adata,
+    subsample_sizes,
 )
 
 HERE = Path(__file__).resolve().parent
@@ -65,6 +66,7 @@ def generate_posterior_matrices(
     n_subsamples: int = 1,
     min_cells_to_subsample: int = MIN_CELLS_TO_SUBSAMPLE,
     n_control_cells: int = N_CONTROL_CELLS,
+    spacing: str = "linear",
     seed: int = 0,
     permute: bool = False,
     permute_seed: int = 0,
@@ -90,11 +92,18 @@ def generate_posterior_matrices(
         ``<out_dir>/<name>/PosteriorMean_matrix_<name>.<fmt>`` where ``name``
         is ``context`` (plus ``_permuted_seed<k>`` for the null arm).
     n_subsamples
-        Subsamples per eligible perturbation. Perturbations with more than
-        ``min_cells_to_subsample`` cells get ``n`` drawn uniformly at random
-        from ``[min_cells_to_subsample, n_cells]``, with the cells themselves
-        drawn uniformly without replacement; the rest contribute only their
-        full row.
+        Subsamples requested per eligible perturbation -- the user-defined
+        knob. For a perturbation with more than ``min_cells_to_subsample``
+        cells, the sizes **span** ``[min_cells_to_subsample, n_cells]``
+        (endpoints included) so the requested number covers the range as
+        evenly as it can; which cells go into each is still random. Fewer are
+        produced if the range cannot supply that many distinct sizes.
+        Perturbations at or below the floor contribute only their full row.
+    spacing
+        ``"linear"`` spreads sizes evenly in ``n``; ``"log"`` spreads them
+        geometrically, covering *precision* more evenly since ``se`` scales as
+        ``1/sqrt(n)``. See
+        :func:`~module_finder.de.arms.subsample_sizes`.
     n_control_cells
         Size of the fixed control set for this context, shared by every row
         (full and subsampled alike). Defaults to 10,000. Controls beyond this
@@ -145,6 +154,7 @@ def generate_posterior_matrices(
         n_subsamples=n_subsamples,
         min_cells_to_subsample=min_cells_to_subsample,
         n_control_cells=n_control_cells,
+        spacing=spacing,
         seed=seed,
         permute=permute,
         permute_seed=permute_seed,
@@ -210,6 +220,7 @@ def generate_posterior_matrices(
         "n_subsamples": n_subsamples,
         "min_cells_to_subsample": min_cells_to_subsample,
         "n_control_cells": n_control_cells,
+        "spacing": spacing,
         "seed": seed,
         "min_cells": min_cells,
         "chunk_perts": chunk_perts,
