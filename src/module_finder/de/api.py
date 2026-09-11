@@ -165,7 +165,15 @@ def generate_posterior_matrices(
     augmented.write_h5ad(h5ad_path)
     build_seconds = time.time() - started
     n_augmented_cells = int(augmented.n_obs)
+    n_input_cells, n_genes = int(adata.n_obs), int(adata.n_vars)
+
+    # Free both objects before the pipeline runs: it reads the augmented file
+    # from disk and never touches these again. On a full ChemoGenetic context
+    # that is ~240 GB (source) + ~500 GB (augmented) handed back, which is the
+    # difference between fitting in a 966 GB allocation and being SIGKILLed.
     del augmented
+    adata = None
+    gc.collect()
 
     env = {
         **os.environ,
@@ -227,9 +235,9 @@ def generate_posterior_matrices(
         "min_cells": min_cells,
         "chunk_perts": chunk_perts,
         "layer": layer,
-        "n_input_cells": int(adata.n_obs),
+        "n_input_cells": n_input_cells,
         "n_augmented_cells": n_augmented_cells,
-        "n_genes": int(adata.n_vars),
+        "n_genes": n_genes,
         "n_rows": int(matrix.shape[0]),
         "build_seconds": round(build_seconds, 1),
         "pipeline_seconds": round(pipeline_seconds, 1),
