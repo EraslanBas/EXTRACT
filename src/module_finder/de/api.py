@@ -12,6 +12,7 @@ cells went into each row.
 
 from __future__ import annotations
 
+import collections
 import gc
 import json
 import os
@@ -367,12 +368,22 @@ def _run_isolated(screen_dir, context, out_dir, **kwargs) -> dict:
         elif value is not None:
             cmd += [flag, str(value)]
 
-    proc = subprocess.run(cmd, capture_output=True, text=True)
-    if proc.returncode != 0:
+    # Stream the child's output rather than capturing it: a context takes hours,
+    # and a silent log for that long is indistinguishable from a hang. Keep a
+    # tail so a failure still reports something useful.
+    tail: collections.deque[str] = collections.deque(maxlen=40)
+    proc = subprocess.Popen(
+        cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1
+    )
+    assert proc.stdout is not None
+    for line in proc.stdout:
+        line = line.rstrip()
+        tail.append(line)
+        print(f"       | {line}", flush=True)
+    returncode = proc.wait()
+    if returncode != 0:
         raise RuntimeError(
-            f"subprocess failed (exit {proc.returncode})\n"
-            f"--- stdout ---\n{proc.stdout[-3000:]}\n"
-            f"--- stderr ---\n{proc.stderr[-3000:]}"
+            f"subprocess failed (exit {returncode})\n" + "\n".join(tail)
         )
     name = context if not kwargs.get("permute") else \
         f"{context}_permuted_seed{kwargs.get('permute_seed', 0)}"

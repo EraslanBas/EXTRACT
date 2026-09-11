@@ -7,6 +7,7 @@ perturb-seq simulator used to generate ground truth and the baselines to beat.
 
 ```
 src/module_finder/      the model (see docs/DESIGN.md)
+    de/                 shrunken-logFC pipeline (see docs/posterior_matrices.md)
     data/               (p,c) x gene matrices; fixed-n cell pseudo-replicates
     models/             linear encoder, per-component head, global linear decoder
     objectives/         contrastive discrimination + reconstruction anchor
@@ -19,13 +20,13 @@ src/baselines/          pca, linear_ica, context_jd + mofa/muvi/svae_plus adapte
 notebooks/simulator/    01-09, the data-generation pipeline
 notebooks/analysis/     context distance sweep
 notebooks/baselines/    MOFA on simulated perturb-seq
-scripts/de/             ashr / glmGamPoi / DESeq2 pipeline scripts
+scripts/                build_posterior_matrices.py (CLI) + de/ legacy scripts
 de_benchmark/           DE-method comparison outputs (53 GB, gitignored)
 data/                   simulator artifacts + h5ads (40 GB, gitignored)
 results/                de_chunks/, mofa/ (gitignored)
 external/               vendored MuVI, ashr (own .git)
 reference/go_data/      NCBI/GO downloads (gitignored)
-docs/                   DESIGN.md, SIMULATION_PIPELINE.md, notes
+docs/                   DESIGN.md, posterior_matrices.md, SIMULATION_PIPELINE.md
 tests/                  36 tests, `pytest tests`
 ```
 
@@ -67,6 +68,27 @@ effects = decompose_effects(Z, ds.perturbations[ds.perturbation_idx],
                             ds.contexts[ds.context_idx])
 print(effects.variance_shares())      # perturbation / context / interaction
 ```
+
+## Generating shrunken logFC matrices
+
+Run this from the **command line, not a notebook** — the objects are hundreds of
+GB resident and a kernel will die holding them. Each context gets its own
+subprocess.
+
+```bash
+python scripts/build_posterior_matrices.py \
+    --screen-dir /processed_datasets/VCI/ChemoGenetic_H1_Basak \
+    --out-dir    /large_storage/ctc/<user>/ModuleFinder/posterior_matrices \
+    --n-control-cells 100000 --n-subsamples 6 --spacing log
+```
+
+Each perturbation gets a full-data row plus one row per subsample, in one
+matrix per context, with the cell count behind every row recorded. Resumable
+and safe to re-run. Requires R with `ashr`.
+
+See **[docs/posterior_matrices.md](docs/posterior_matrices.md)** for the
+parameters, how to size memory against a Slurm cgroup (not `free`), and the
+output layout.
 
 ## Run the cheap baselines first
 
