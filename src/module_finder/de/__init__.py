@@ -34,7 +34,12 @@ any differential expression:
   -> matrix + per-row cell counts.
 """
 
-from .api import PosteriorRun, generate_posterior_matrices
+from .api import (
+    PosteriorRun,
+    context_path,
+    generate_posterior_matrices,
+    run_screen,
+)
 from .arms import (
     MIN_CELLS_TO_SUBSAMPLE,
     N_CONTROL_CELLS,
@@ -46,6 +51,8 @@ from .arms import (
 
 __all__ = [
     "generate_posterior_matrices",
+    "run_screen",
+    "context_path",
     "PosteriorRun",
     "build_augmented_adata",
     "plan_augmentation",

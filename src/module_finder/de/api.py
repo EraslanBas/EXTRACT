@@ -12,6 +12,7 @@ cells went into each row.
 
 from __future__ import annotations
 
+import gc
 import json
 import os
 import shutil
@@ -248,6 +249,135 @@ def generate_posterior_matrices(
         row_metadata=row_metadata,
         meta=meta,
     )
+
+
+def context_path(screen_dir: str | Path, context: str) -> Path:
+    """Locate a context's ``.h5ad``, nested (``<ctx>/<ctx>.h5ad``) or flat."""
+    screen_dir = Path(screen_dir)
+    for candidate in (screen_dir / context / f"{context}.h5ad",
+                      screen_dir / f"{context}.h5ad"):
+        if candidate.exists():
+            return candidate
+    raise FileNotFoundError(
+        f"no .h5ad for context {context!r} under {screen_dir} "
+        f"(tried <ctx>/<ctx>.h5ad and <ctx>.h5ad)"
+    )
+
+
+def run_screen(
+    screen_dir: str | Path,
+    contexts: list[str],
+    out_dir: str | Path,
+    isolate: bool = True,
+    skip_existing: bool = True,
+    matrix_format: str = "parquet",
+    min_free_tb: float = 0.5,
+    **kwargs,
+) -> pd.DataFrame:
+    """Generate posterior matrices for every context. Returns a summary table.
+
+    Parameters
+    ----------
+    isolate
+        Run each context in a **fresh subprocess** (the default). These objects
+        are ~150 GB resident and roughly twice that once augmented; Python and
+        anndata do not reliably hand freed memory back to the OS, so a
+        long-lived process accumulates peak across contexts and eventually
+        dies. A subprocess exit reclaims everything unconditionally, and a
+        crash costs one context rather than the whole run. Set False to run
+        in-process (fine for small data, or for debugging a traceback).
+    skip_existing
+        Skip contexts whose matrix is already on disk, making the call
+        resumable.
+    min_free_tb
+        Stop if the output volume drops below this.
+    **kwargs
+        Passed to :func:`generate_posterior_matrices` -- ``n_subsamples``,
+        ``spacing``, ``n_control_cells``, ``min_cells_to_subsample``,
+        ``min_cells``, ``chunk_perts``, ``n_ashr_jobs``, ``permute``, ...
+    """
+    out_dir = Path(out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    rows: list[dict] = []
+
+    for context in contexts:
+        done = out_dir / context / f"PosteriorMean_matrix_{context}.{matrix_format}"
+        if skip_existing and done.exists():
+            print(f"[skip] {context:<24} already done", flush=True)
+            continue
+
+        started = time.time()
+        try:
+            if isolate:
+                meta = _run_isolated(
+                    screen_dir, context, out_dir,
+                    matrix_format=matrix_format, **kwargs
+                )
+            else:
+                import anndata as ad
+
+                adata = ad.read_h5ad(context_path(screen_dir, context))
+                try:
+                    result = generate_posterior_matrices(
+                        adata, context=context, out_dir=out_dir,
+                        matrix_format=matrix_format, **kwargs
+                    )
+                    meta = result.meta
+                finally:
+                    del adata
+                    gc.collect()
+            minutes = (time.time() - started) / 60
+            rows.append({
+                "context": context, "rows": meta["n_rows"], "genes": meta["n_genes"],
+                "cells_in": meta["n_input_cells"],
+                "cells_augmented": meta["n_augmented_cells"],
+                "minutes": round(minutes, 1), "status": "ok",
+            })
+            print(f"[ok]   {context:<24} {meta['n_rows']:,} rows x "
+                  f"{meta['n_genes']:,} genes in {minutes:.1f} min", flush=True)
+        except Exception as exc:
+            rows.append({"context": context, "status": f"{type(exc).__name__}: {exc}"})
+            print(f"[FAIL] {context:<24} {type(exc).__name__}: {exc}", flush=True)
+
+        free_tb = shutil.disk_usage(out_dir).free / 1e12
+        print(f"       {free_tb:.1f} TB free", flush=True)
+        if free_tb < min_free_tb:
+            print(f"       stopping: under {min_free_tb} TB left", flush=True)
+            break
+
+    return pd.DataFrame(rows)
+
+
+def _run_isolated(screen_dir, context, out_dir, **kwargs) -> dict:
+    """Run one context via the CLI in a subprocess; return its manifest."""
+    script = Path(__file__).resolve().parents[3] / "scripts" / "build_posterior_matrices.py"
+    if not script.exists():
+        raise FileNotFoundError(f"driver script not found: {script}")
+
+    cmd = [sys.executable, str(script),
+           "--screen-dir", str(screen_dir),
+           "--out-dir", str(out_dir),
+           "--contexts", context,
+           "--no-isolate"]
+    for key, value in kwargs.items():
+        flag = "--" + key.replace("_", "-")
+        if isinstance(value, bool):
+            if value:
+                cmd.append(flag)
+        elif value is not None:
+            cmd += [flag, str(value)]
+
+    proc = subprocess.run(cmd, capture_output=True, text=True)
+    if proc.returncode != 0:
+        raise RuntimeError(
+            f"subprocess failed (exit {proc.returncode})\n"
+            f"--- stdout ---\n{proc.stdout[-3000:]}\n"
+            f"--- stderr ---\n{proc.stderr[-3000:]}"
+        )
+    name = context if not kwargs.get("permute") else \
+        f"{context}_permuted_seed{kwargs.get('permute_seed', 0)}"
+    manifest = out_dir / name / "module_finder_manifest.json"
+    return json.loads(manifest.read_text())
 
 
 def _collect_row_metadata(
