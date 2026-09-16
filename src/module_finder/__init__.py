@@ -1,30 +1,50 @@
-"""module_finder -- identifiable latent factors from perturbation x context screens.
+"""module_finder -- identifiable gene programs from perturbation x context screens.
 
 The model, in one line:
 
-    x_{p,c}  =  z_{p,c} @ B  +  noise
+    x  ~  z B ,      z = argmin_z || m * (x - z B) ||^2
 
 * ``B`` [n_factors, n_genes] is a **global** loading matrix, shared across every
-  perturbation and every context. Row ``k`` is factor ``k``'s gene loading
-  vector, and it is a model parameter rather than a post-hoc estimate.
-* ``z_{p,c}`` is how perturbation ``p`` in context ``c`` activates each factor,
-  decomposable into ``mu_p + gamma_c + delta_pc`` (``interpret.effects``).
+  perturbation and every context, and it is the only interpretable output. Row
+  ``k`` is factor ``k``'s gene loading vector.
+* ``z`` is the masked least-squares projection of ``x`` onto ``B``'s row space
+  -- *derived* from ``B``, not produced by a separate encoder. One
+  factor->gene map, so no two modules can disagree about what factor ``k``
+  means. ``m`` masks the perturbation's own transcript.
 
-Fitting combines two objectives (``objectives/``):
+Fitting combines two terms (``objectives/``):
 
-1. a **contrastive** term discriminating real ``(x, u)`` pairs from pairs with a
-   shuffled ``u = (perturbation, context)`` label, scored by a head that is a
-   *sum over components* with no cross-component terms (``models.heads``);
-2. a **reconstruction** term anchoring the factors to directions that explain
-   real variance.
+1. **L_disc** -- a contrastive term discriminating real ``(x, u)`` pairs from
+   pairs carrying a permuted label ``u = (perturbation, context)``, scored by a
+   head restricted to a *sum over components*, ``sum_k psi_k(z_k, u)``, with no
+   cross-component terms (``models.heads``). This **picks the rotation**:
+   additive separability is not preserved under mixing, so the sum-form optimum
+   is reachable only in unmixed coordinates.
+2. **L_recon** -- a precision-weighted reconstruction term. This **picks the
+   subspace**: a tied linear autoencoder on reconstruction alone recovers the
+   principal subspace and leaves orientation free (Baldi & Hornik, 1989).
 
-Both are needed. The contrastive term supplies the identifiability structure;
-the reconstruction term stops it from selecting tiny-variance directions that
-discriminate well but carry no interpretable gene program.
+    L = L_disc + alpha * L_recon
 
-See ``docs/DESIGN.md`` for the derivation and the assumptions being bought.
+Both are needed. Drop the discriminator and this is PCA with extra steps; drop
+the reconstruction term and the contrastive objective selects tiny-variance
+directions that discriminate well but carry no gene program.
+
+The objective is to recover the factors that *generated* the data, not to
+predict responses of unseen perturbations.
+
+Full specification, with all mathematical and architectural detail:
+``docs/paper/modulefinder.pdf``.
 """
 
 __version__ = "0.1.0.dev0"
 
-__all__ = ["data", "models", "objectives", "interpret", "evaluation"]
+__all__ = [
+    "data",
+    "models",
+    "objectives",
+    "interpret",
+    "evaluation",
+    "train",
+    "paths",
+]

@@ -1,17 +1,25 @@
-"""Training objectives: contrastive discrimination + reconstruction anchor."""
+"""Training objectives: contrastive discrimination + reconstruction anchor.
+
+``L_disc`` picks the rotation; ``L_recon`` picks the subspace. The optional
+total-correlation term is in :mod:`~module_finder.objectives.total_correlation`
+and is off by default.
+"""
 
 from .contrastive import (
+    DEFAULT_WEIGHTS,
     STRATEGIES,
-    NegativeSampler,
+    StratifiedNegativeSampler,
     contrastive_loss,
     discrimination_accuracy,
 )
-from .reconstruction import weighted_mse
+from .reconstruction import precision_weights, weighted_squared_error
 
 __all__ = [
-    "NegativeSampler",
+    "StratifiedNegativeSampler",
     "contrastive_loss",
     "discrimination_accuracy",
-    "weighted_mse",
+    "precision_weights",
+    "weighted_squared_error",
     "STRATEGIES",
+    "DEFAULT_WEIGHTS",
 ]

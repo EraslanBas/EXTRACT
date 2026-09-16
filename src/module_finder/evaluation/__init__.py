@@ -6,9 +6,13 @@ from .heldout import (
     split_context_holdout,
     split_pair_holdout,
 )
+from .span import SpanResidual, leave_one_context_out, span_residual
 from .stability import FactorMatch, match_factors, stability_across_seeds
 
 __all__ = [
+    "span_residual",
+    "leave_one_context_out",
+    "SpanResidual",
     "match_factors",
     "FactorMatch",
     "stability_across_seeds",

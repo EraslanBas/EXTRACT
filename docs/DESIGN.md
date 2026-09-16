@@ -1,93 +1,49 @@
-# module_finder: design and assumptions
+# ModuleFinder design
 
-## The model
+The full specification — every equation, the identifiability argument, the
+shapes table, what was deliberately excluded and why, and the open questions —
+is the paper:
 
-    x_{p,c}  =  z_{p,c} @ B  +  noise
+**[`docs/paper/modulefinder.pdf`](paper/modulefinder.pdf)** (6 pp.)
 
-* `B` [n_factors, n_genes] — **global** loading matrix, shared across every
-  perturbation and context. Row `k` is factor `k`'s gene loading vector, and it
-  is a model parameter rather than a post-hoc estimate.
-* `z_{p,c}` — how perturbation `p` in context `c` activates each factor,
-  decomposed by `interpret.effects` into
+Rebuild it with `make -C docs/paper`. The source is `docs/paper/modulefinder.tex`.
 
-      z_{p,c} = grand_mean + mu_p + gamma_c + delta_pc
+## Where the code implements what
 
-  where `delta_pc` (the interaction) is the scientific payload of a
-  chemogenetic screen.
+| paper | code |
+|---|---|
+| §2 rows, Welch + `ashr` | `module_finder.de` (`ComputeSE.py`, `run_ashr_on_chunk.R`, `shards.py`, `matrices.py`) |
+| §3.1 eq. (2) the tied projection `z = x B⁺` | `models.loadings.GlobalLoadings.project` |
+| §3.2 eq. (3)–(5) masked projection, Sherman–Morrison | `models.loadings.GlobalLoadings.project`, `data.ontarget.on_target_index` |
+| §3.3 eq. (6)–(8) the per-component head | `models.heads.PerComponentHead` |
+| §3.4 eq. (9) label network `λ(u)` | `models.label_net.FactorizedLabelNet` |
+| §4.1 eq. (9) `L_disc` | `objectives.contrastive.contrastive_loss` |
+| §4.2 eq. (10) `L_recon`, precision weights | `objectives.reconstruction`, `GlobalLoadings.squared_error` |
+| §4.3 eq. (11) optional TC term | `objectives.total_correlation` (off by default) |
+| §6 stratified negatives | `objectives.contrastive.StratifiedNegativeSampler` |
+| §7 reading `z`, sign anchoring | `interpret.loadings`, `interpret.effects` |
+| §8 eq. (14) the span test | `evaluation.span` |
+| Q4 cross-seed stability | `evaluation.stability` (Hungarian + MCC) |
+| the training loop, eq. (12) | `train.fit` |
 
-Requiring `B` to be global and consistent forces the decoder to be linear, which
-in turn makes the encoder linear. **This model is therefore linear ICA with
-auxiliary variables, not nonlinear ICA.** That is a simplification, not a loss:
-identifiability becomes available through several weaker routes, and the
-baselines in `src/baselines/` estimate the same model class much more cheaply.
-Any nonlinearity lives in the `(p,c) -> z` map (`models.label_net`), which is
-where the drug x perturbation interaction belongs.
+## Deliberately absent
 
-## Why the per-component head
+`models/encoder.py` and `models/decoder.py` were removed. `B` is the only
+factor→gene map and the projection is derived from it (§3.1) — with a separate
+encoder there are two maps that can disagree about what factor `k` means, and
+encoder weights are filters rather than patterns. There is also no label prior
+`f(e_p, e_c) → z`: it exists only to predict without `x`, and prediction is not
+the objective.
 
-The optimal discriminator for the real-vs-shuffled-label task is
-`log p(x|u) / p(x)`. Under the model this equals
+## Running it
 
-    sum_i [ log p_i(s_i|u) - log p_i(s_i) ]
+```bash
+python scripts/fit_model.py --contexts Stattic DG-172 --epochs 50 --seed 0
+python scripts/fit_model.py --contexts Stattic DG-172 --epochs 50 --seed 1
+# then compare the two B matrices with evaluation.stability.match_factors
+```
 
-so the true answer is already additively separable in the true source
-coordinates. Separability is not preserved under mixing, so a head restricted to
-`sum_k psi_k(z_k, u)` can only reach the optimum if its coordinates *are* the
-source coordinates. An unrestricted MLP head can absorb `z -> M z` in its first
-layer, the loss cannot see `M`, and the axes float. `models.heads` enforces the
-restriction; `UnconstrainedHead` exists to ablate it.
-
-Caveat: a purely quadratic basis is rotation invariant (`sum_k z_k^2`), the same
-reason Gaussian sources are unidentifiable in linear ICA. Keep `abs` or `tanh`.
-
-The constraint binds **only** on how the label-derived coefficients meet the
-features. `label_net` is fully expressive and carries all of the interaction.
-
-## Two ingredients, both required
-
-1. **The label must modulate the factors** (sufficient variability). A property
-   of the data and design, not the code. Verified empirically: with one row per
-   `(p,c)` the estimator reaches 0.96 discrimination accuracy but only ~0.80 MCC
-   against the true loadings; with 5 and 20 replicates per pair MCC rises to
-   0.93 and 0.94 while accuracy *falls* to 0.88 and 0.83. High accuracy with
-   thin replication is memorisation, not learning. (Synthetic data, 40
-   perturbations x 6 contexts x 5 factors x 100 genes.)
-2. **The per-component head** (above).
-
-## Known shortcuts to defend against
-
-| Shortcut | Magnitude in the ChemoGenetic matrices | Defence |
-|---|---|---|
-| Per-gene scale heterogeneity | per-gene SD spans ~5.4e4x | `data.rowbound.standardize_genes` |
-| Per-perturbation effect size | per-perturbation SD spans ~341x | hard negatives; row weighting |
-| Cell-count leak via noise scale | counts vary several-fold per pair | fixed `n_cells` in `data.pseudoreplicates` |
-| Shuffling values *within* a vector | destroys gene marginals | never do it; permute whole rows only |
-
-Measured on a 2,292-perturbation x first-1,000-gene slice of
-`PosteriorMean_matrix_Stattic.csv`; participation-ratio effective rank of that
-slice is 16.0, which is why `n_factors` should be ~20-30, not 100+.
-
-## What is identified, and what is not
-
-Recovery is up to **permutation and sign** (and, in the nonlinear reading, an
-element-wise transformation). So factor ordering is arbitrary across runs, sign
-and scale carry no meaning until anchored, and magnitudes are not comparable
-across factors. What *is* pinned down is the partition: which genes and which
-perturbations belong to each factor.
-
-Unmixedness cannot be tested directly, and **cannot be tested by testing
-independence** — Darmois' construction yields exactly-independent components
-that are still mixtures of the truth. The available evidence is:
-
-* cross-seed reproducibility (`evaluation.stability`),
-* held-out `(p,c)` reconstruction (`evaluation.heldout`),
-* beating `baselines.linear_ica` and `baselines.context_jd`, which estimate the
-  same model class cheaply. If they win, that is a real result about the data.
-
-## Assumption being bought
-
-A global linear `B` assumes factor effects **add** in LFC space and that a
-factor means the same thing in DMSO as under Romidepsin. Defensible — LFCs are
-already differential — but testable: hold out `(p,c)` combinations and look for
-systematic per-context residual structure, or compare
-`interpret.loadings.loadings_per_context` via `loading_agreement`.
+Ablations that the paper argues should degrade the result, available as flags:
+`--unconstrained-head` (removes identifiability), `--no-mask` (lets knockdown
+efficiency claim a factor), `--tc-weight` (adds independence pressure, which is
+not identifiability).
