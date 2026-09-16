@@ -40,6 +40,20 @@ from .api import (
     generate_posterior_matrices,
     run_screen,
 )
+from .matrices import (
+    build_all_matrices,
+    build_context,
+    load_matrices,
+    load_shard_matrix,
+)
+from .shards import (
+    ShardResult,
+    compute_se_for_shard,
+    context_seed,
+    find_shards,
+    plan_shard_rows,
+    prepare_control_subset,
+)
 from .arms import (
     MIN_CELLS_TO_SUBSAMPLE,
     N_CONTROL_CELLS,
@@ -59,5 +73,15 @@ __all__ = [
     "subsample_sizes",
     "SUBSAMPLE_SEP",
     "MIN_CELLS_TO_SUBSAMPLE",
+    "find_shards",
+    "prepare_control_subset",
+    "plan_shard_rows",
+    "compute_se_for_shard",
+    "ShardResult",
+    "build_all_matrices",
+    "load_matrices",
+    "build_context",
+    "load_shard_matrix",
+    "context_seed",
     "N_CONTROL_CELLS",
 ]
