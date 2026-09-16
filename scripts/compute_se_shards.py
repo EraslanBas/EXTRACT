@@ -25,6 +25,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
+from module_finder import paths
+
 import pandas as pd
 
 from module_finder.de import compute_se_for_shard, find_shards, prepare_control_subset
@@ -42,7 +44,7 @@ def build_parser() -> argparse.ArgumentParser:
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
     )
     p.add_argument("--screen-dir", required=True, type=Path)
-    p.add_argument("--out-dir", required=True, type=Path)
+    p.add_argument("--out-dir", type=Path, default=paths.computese())
     p.add_argument("--contexts", nargs="+", default=CHEMOGENETIC_CONTEXTS)
     p.add_argument("--perturbation-key", default="target_gene")
     p.add_argument("--control-label", default="non-targeting")

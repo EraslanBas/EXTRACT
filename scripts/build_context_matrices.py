@@ -16,14 +16,16 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
+from module_finder import paths
+
 from module_finder.de import build_all_matrices
 
 
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--computese", required=True, type=Path)
-    ap.add_argument("--out-dir", required=True, type=Path)
+    ap.add_argument("--computese", type=Path, default=paths.computese())
+    ap.add_argument("--out-dir", type=Path, default=paths.matrices())
     ap.add_argument("--contexts", nargs="+", default=None)
     ap.add_argument("--format", choices=["parquet", "csv"], default="parquet")
     ap.add_argument("--overwrite", action="store_true")

@@ -1,4 +1,6 @@
-# ---- Large data artifacts (kept on disk, never in git) ----
+# ---- Large data artifacts ----
+# data/ and results/ now live under $MODULEFINDER_ROOT on large_storage
+# (see docs/data_layout.md); these entries guard against re-creating them here.
 data/
 results/
 de_benchmark/

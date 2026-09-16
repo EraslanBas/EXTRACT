@@ -16,14 +16,17 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
+from module_finder import paths
+
 from module_finder.data import STRATEGIES, build_augmented
 
 
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--matrices", required=True, type=Path)
-    ap.add_argument("--out-dir", required=True, type=Path)
+    ap.add_argument("--matrices", type=Path, default=paths.matrices(),
+                    help="dir holding <context>_PosteriorMean.parquet")
+    ap.add_argument("--out-dir", type=Path, default=paths.augmented())
     ap.add_argument("--contexts", nargs="+", default=None)
     ap.add_argument("--label-strategies", nargs="+", default=list(STRATEGIES),
                     choices=list(STRATEGIES))

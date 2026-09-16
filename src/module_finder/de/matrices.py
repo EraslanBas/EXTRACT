@@ -23,6 +23,8 @@ import numpy as np
 import pandas as pd
 import pyarrow.csv as pv
 
+from .. import paths
+
 
 def read_columns(path: Path, columns: list[str]) -> pd.DataFrame:
     """pyarrow CSV read -- roughly 60x faster than pandas on these files."""
@@ -189,7 +191,7 @@ def build_all_matrices(computese_dir: str | Path, out_dir: str | Path,
 
 
 def load_matrices(
-    matrices_dir: str | Path,
+    matrices_dir: str | Path | None = None,
     contexts: list[str] | None = None,
     variant: str | None = None,
     fmt: str = "parquet",
@@ -214,6 +216,8 @@ def load_matrices(
         ``row_id, label, context, perturbation, variant, n_cells, n_ctrl,
         shard`` in the same order.
     """
+    if matrices_dir is None:
+        matrices_dir = paths.matrices()
     matrices_dir = Path(matrices_dir)
     found = sorted(matrices_dir.glob(f"*_PosteriorMean.{fmt}"))
     names = [f.name.replace(f"_PosteriorMean.{fmt}", "") for f in found]

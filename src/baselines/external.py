@@ -17,7 +17,8 @@ from .registry import register
 class MOFABaseline:
     """MOFA+ via ``mofapy2``.
 
-    A fitted model and its outputs already exist under ``results/mofa/``
+    A fitted model and its outputs already exist under ``<root>/results/mofa/``
+    (see :mod:`module_finder.paths`)
     (``mofa_model.hdf5``, ``loadings_{A,B,C}.parquet``), produced by
     ``notebooks/baselines/10_MOFA_PerturbSeq.ipynb``. Use
     :meth:`from_hdf5` to wrap those rather than refitting.
@@ -38,7 +39,7 @@ class MOFABaseline:
             raise ImportError(
                 "mofapy2 is required for the MOFA baseline "
                 "(`pip install mofapy2`), or wrap an existing fit with "
-                "MOFABaseline.from_hdf5('results/mofa/mofa_model.hdf5')"
+                "MOFABaseline.from_hdf5(paths.results() / 'mofa/mofa_model.hdf5')"
             ) from exc
         raise NotImplementedError(
             "Refitting MOFA from this adapter is not wired up yet. The fitting "
