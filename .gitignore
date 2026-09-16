@@ -37,3 +37,9 @@ dist/
 # ---- Downloadable reference data (NCBI/GO) ----
 SRC/go_data/
 reference/go_data/
+
+# ---- LaTeX build artifacts ----
+docs/paper/*.aux
+docs/paper/*.log
+docs/paper/*.out
+docs/paper/*.png
