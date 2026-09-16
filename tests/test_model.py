@@ -406,3 +406,158 @@ def test_zero_weights_rejected():
             n_perturbations=12, n_contexts=4,
             weights={"same_s_other_pert": 0.0},
         )
+
+
+# -------------------------------------------------------------- train/test
+
+
+def _toy_meta(n_pert=12, n_ctx=4, n_strata=3):
+    import pandas as pd
+    rows = []
+    for pi in range(n_pert):
+        for ci in range(n_ctx):
+            for si in range(n_strata):
+                lab = f"P{pi}" if si == 0 else f"P{pi}__sub{si-1:02d}"
+                rows.append(
+                    {"perturbation": f"P{pi}", "context": f"C{ci}",
+                     "label": lab, "n_cells": 3000 if si == 0 else 100 * si}
+                )
+    return pd.DataFrame(rows)
+
+
+def test_fit_trains_only_on_train_rows():
+    """A held-out pair must never appear in a training batch."""
+    from module_finder.data.augment import make_split
+
+    meta = _toy_meta()
+    X, p, c, s, n = _toy_dataset(n_pert=12, n_ctx=4, n_strata=3, n_genes=40)
+    split = make_split(meta, level="pair", test_frac=0.2, seed=0)
+
+    pairs = list(zip(meta.perturbation, meta.context))
+    train_pairs = {pc for pc, m in zip(pairs, split.train) if m}
+    test_pairs = {pc for pc, m in zip(pairs, split.test) if m}
+    assert not (train_pairs & test_pairs)
+
+    cfg = TrainConfig(n_factors=4, epochs=4, batch_size=32, log_every=0,
+                      eval_every=2, patience=0)
+    model, history = fit(
+        X, p, c, s, n, config=cfg,
+        train_rows=split.train, val_rows=split.test,
+    )
+    assert "val_accuracy" in history[-1]
+    assert history[-1]["val_n_rows"] == int(split.test.sum())
+
+
+def test_all_eleven_samples_of_a_held_out_pair_move_together():
+    from module_finder.data.augment import make_split
+
+    meta = _toy_meta(n_pert=20, n_ctx=3, n_strata=11)
+    split = make_split(meta, level="pair", test_frac=0.15, seed=1)
+    grouped = meta.assign(test=split.test).groupby(
+        ["perturbation", "context"]
+    )["test"].nunique()
+    assert (grouped == 1).all(), "a pair was split across train and test"
+
+
+def test_fit_rejects_a_split_smaller_than_one_batch():
+    X, p, c, s, n = _toy_dataset(n_pert=6, n_ctx=2, n_strata=2, n_genes=20)
+    train = np.zeros(len(X), dtype=bool)
+    train[:10] = True
+    with pytest.raises(ValueError, match="training rows"):
+        fit(X, p, c, s, n, config=TrainConfig(batch_size=256, epochs=1,
+                                              log_every=0),
+            train_rows=train)
+
+
+def test_evaluate_returns_the_documented_keys():
+    from module_finder.objectives import StratifiedNegativeSampler
+    from module_finder.train import evaluate
+
+    X, p, c, s, n = _toy_dataset(n_pert=10, n_ctx=3, n_strata=3, n_genes=30)
+    cfg = TrainConfig(n_factors=4, epochs=2, batch_size=32, log_every=0,
+                      eval_every=0)
+    model, _ = fit(X, p, c, s, n, config=cfg)
+
+    rows = np.arange(min(200, len(X)))
+    sampler = StratifiedNegativeSampler(
+        perturbation_idx=p[rows], context_idx=c[rows], stratum=s[rows],
+        n_perturbations=int(p.max()) + 1, n_contexts=int(c.max()) + 1,
+        weights={"same_s_other_pert": 1.0},
+    )
+    m = evaluate(model, torch.from_numpy(X), p, c, rows, sampler,
+                 np.random.default_rng(0))
+    for key in ("n_rows", "accuracy", "disc", "recon", "real_score_mean",
+                "fake_score_mean", "span_residual_median", "span_residual_q90"):
+        assert key in m, key
+    assert 0.0 <= m["accuracy"] <= 1.0
+    assert 0.0 <= m["span_residual_median"] <= 1.5
+
+
+# ------------------------------------------------------- three-way split
+
+
+def test_three_way_split_is_disjoint_and_complete():
+    from module_finder.data.augment import make_split
+
+    meta = _toy_meta(n_pert=40, n_ctx=4, n_strata=11)
+    split = make_split(meta, level="pair", test_frac=0.1, val_frac=0.1, seed=0)
+    assert split.three_way
+    assert int(split.train.sum() + split.val.sum() + split.test.sum()) == len(meta)
+    assert not (split.train & split.val).any()
+    assert not (split.train & split.test).any()
+    assert not (split.val & split.test).any()
+    assert not set(split.held_out) & set(split.held_out_val)
+
+
+def test_three_way_split_keeps_pairs_whole():
+    from module_finder.data.augment import make_split
+
+    meta = _toy_meta(n_pert=30, n_ctx=3, n_strata=11)
+    split = make_split(meta, level="pair", test_frac=0.12, val_frac=0.12, seed=3)
+    half = np.select(
+        [split.train, split.val, split.test], ["train", "val", "test"],
+        default="none",
+    )
+    assert "none" not in set(half)
+    per_pair = (
+        meta.assign(half=half).groupby(["perturbation", "context"])["half"].nunique()
+    )
+    assert (per_pair == 1).all()
+
+
+def test_split_rejects_impossible_fractions():
+    from module_finder.data.augment import make_split
+
+    meta = _toy_meta(n_pert=4, n_ctx=1, n_strata=2)
+    with pytest.raises(ValueError, match="would hold out"):
+        make_split(meta, level="pair", test_frac=0.7, val_frac=0.7, seed=0)
+
+
+def test_early_stopping_restores_the_best_epoch():
+    """The last epoch is not the model we want; the selected one is."""
+    from module_finder.data.augment import make_split
+
+    meta = _toy_meta(n_pert=16, n_ctx=4, n_strata=3)
+    X, p, c, s, n = _toy_dataset(n_pert=16, n_ctx=4, n_strata=3, n_genes=40)
+    split = make_split(meta, level="pair", test_frac=0.12, val_frac=0.12, seed=0)
+
+    cfg = TrainConfig(n_factors=4, epochs=30, batch_size=32, log_every=0,
+                      eval_every=1, patience=2, seed=0)
+    model, history = fit(X, p, c, s, n, config=cfg,
+                         train_rows=split.train, val_rows=split.val)
+
+    evaluated = [h for h in history if "val_accuracy" in h]
+    best = max(evaluated, key=lambda h: h["val_accuracy"])
+    assert history[-1]["selected_epoch"] == best["epoch"]
+    # patience must actually have been able to fire
+    assert len(history) <= 30
+
+
+def test_fit_rejects_overlapping_train_and_val():
+    X, p, c, s, n = _toy_dataset(n_pert=12, n_ctx=3, n_strata=3, n_genes=30)
+    mask = np.zeros(len(X), dtype=bool)
+    mask[:] = True
+    with pytest.raises(ValueError, match="overlap"):
+        fit(X, p, c, s, n, config=TrainConfig(epochs=1, batch_size=32,
+                                              log_every=0),
+            train_rows=mask, val_rows=mask)
