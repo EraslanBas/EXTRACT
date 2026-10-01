@@ -122,9 +122,8 @@ Symbols and terms used throughout.
 ::::
 
 :::{note}
-ModuleFinder is under active development. The full specification, with every
-equation, is the {download}`method paper (PDF) <../paper/modulefinder.pdf>`. Where the paper
-and the current code differ, these pages follow the code.
+ModuleFinder is under active development; these pages describe the method as
+currently implemented.
 :::
 
 ```{toctree}

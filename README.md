@@ -15,8 +15,7 @@ contrastive head (does this response belong to this perturbation in this
 context?) fixes their orientation inside it.
 
 **Documentation:** https://eraslanbas.github.io/ModuleFinder/ — the method,
-page by page. The full specification is the method paper,
-[`docs/paper/modulefinder.pdf`](docs/paper/modulefinder.pdf).
+page by page.
 
 ## Layout
 
@@ -33,7 +32,6 @@ src/perturbseq_sim/     perturb-seq simulator
 src/baselines/          PCA, linear ICA, joint diagonalisation, adapters
 scripts/                CLIs: logFC matrices, split, fit, sweep, summaries, test read
 docs/source/            documentation site (Sphinx)
-docs/paper/             method paper
 notebooks/              simulator and analysis notebooks
 tests/                  unit tests, no screen data needed
 ```

@@ -1,12 +1,9 @@
 # ModuleFinder design
 
-The full specification — every equation, the identifiability argument, the
-shapes table, what was deliberately excluded and why, and the open questions —
-is the paper:
-
-**[`docs/paper/modulefinder.pdf`](paper/modulefinder.pdf)** (9 pp.)
-
-Rebuild it with `make -C docs/paper`. The source is `docs/paper/modulefinder.tex`.
+The method is described page by page on the documentation site
+(`docs/source/method/`, published at https://eraslanbas.github.io/ModuleFinder/).
+Section numbers below refer to the method paper, which is not part of this
+repository.
 
 ## Where the code implements what
 

@@ -60,3 +60,6 @@ scripts/build_matrices_when_ready.sh
 scripts/finish_jte607.sh
 scripts/resume_after_orphans.sh
 scripts/launch_e500.sh
+
+# ---- Method paper: kept local, not part of the repository ----
+docs/paper/
