@@ -2,7 +2,7 @@
 import numpy as np
 import pytest
 
-from module_finder.evaluation import (
+from extract.evaluation import (
     match_factors,
     reconstruction_score,
     split_context_holdout,

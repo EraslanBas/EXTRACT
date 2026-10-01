@@ -1,9 +1,9 @@
-"""ModuleFinder: the model and its training loop.
+"""EXTRACT: the model and its training loop.
 
     L = L_disc + alpha * L_recon   [ + tc_weight * L_tc ]
 
 ``L_disc`` picks the rotation, ``L_recon`` picks the subspace. Implements
-``docs/paper/modulefinder.pdf`` exactly; equation numbers in comments refer to
+the method paper exactly; equation numbers in comments refer to
 it.
 """
 
@@ -131,7 +131,7 @@ class TrainConfig:
     log_every: int = 10
 
 
-class ModuleFinder(nn.Module):
+class Extract(nn.Module):
     """One global loading matrix, a per-component head, and a label network.
 
     There is no encoder and no label prior. ``B`` is the only factor->gene map;
@@ -216,8 +216,8 @@ def fit(
     train_rows: np.ndarray | None = None,
     val_rows: np.ndarray | None = None,
     is_real: np.ndarray | None = None,
-    on_eval: Callable[[int, ModuleFinder], None] | None = None,
-) -> tuple[ModuleFinder, list[dict]]:
+    on_eval: Callable[[int, Extract], None] | None = None,
+) -> tuple[Extract, list[dict]]:
     """Fit the model. Returns ``(model, history)``.
 
     Parameters
@@ -265,7 +265,7 @@ def fit(
         construction.
     train_rows, val_rows
         Boolean masks over rows, from
-        :func:`module_finder.data.augment.make_split` at ``level="pair"``. All
+        :func:`extract.data.augment.make_split` at ``level="pair"``. All
         eleven samples of a held-out ``(perturbation, context)`` move together,
         so no pair appears in more than one half. ``None`` trains on
         everything, which leaves no way to tell a model that found structure
@@ -320,7 +320,7 @@ def fit(
             f"{config.batch_size}"
         )
 
-    model = ModuleFinder(
+    model = Extract(
         n_genes=n_genes,
         n_perturbations=n_perturbations,
         n_contexts=n_contexts,
@@ -627,7 +627,7 @@ def fit(
 
 @torch.no_grad()
 def evaluate(
-    model: ModuleFinder,
+    model: Extract,
     X_t: torch.Tensor,
     perturbation_idx: np.ndarray,
     context_idx: np.ndarray,
@@ -813,7 +813,7 @@ def prepare(
     perturbation_levels: np.ndarray | None = None,
     context_levels: np.ndarray | None = None,
 ) -> dict:
-    """Turn ``(X, meta)`` from :func:`module_finder.de.load_matrices` into
+    """Turn ``(X, meta)`` from :func:`extract.de.load_matrices` into
     :func:`fit` arguments.
 
     ``meta`` needs ``perturbation``, ``context``, ``label`` and ``n_cells``.
@@ -867,7 +867,7 @@ def prepare(
 
 @torch.no_grad()
 def encode(
-    model: ModuleFinder, X: np.ndarray, target_col: np.ndarray | None = None
+    model: Extract, X: np.ndarray, target_col: np.ndarray | None = None
 ) -> np.ndarray:
     """Factor activations ``Z`` for all rows of ``X``."""
     model.eval()
@@ -883,7 +883,7 @@ def encode(
 
 @torch.no_grad()
 def reconstruct(
-    model: ModuleFinder, X: np.ndarray, target_col: np.ndarray | None = None
+    model: Extract, X: np.ndarray, target_col: np.ndarray | None = None
 ) -> np.ndarray:
     """``X_hat = z B`` with ``z`` the masked projection of ``X``."""
     model.eval()
@@ -898,7 +898,7 @@ def reconstruct(
 
 
 __all__ = [
-    "ModuleFinder",
+    "Extract",
     "evaluate",
     "TrainConfig",
     "fit",

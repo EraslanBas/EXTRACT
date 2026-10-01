@@ -4,7 +4,7 @@ import pytest
 from scipy.stats import ortho_group
 
 import baselines
-from module_finder.evaluation import match_factors
+from extract.evaluation import match_factors
 
 
 @pytest.fixture

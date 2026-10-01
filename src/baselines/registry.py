@@ -7,8 +7,8 @@ baselines rather than one-off notebooks:
     Z = model.transform(X)      # [n_samples, n_factors]
     B = model.loadings          # [n_factors, n_genes]
 
-``Z`` feeds ``module_finder.interpret.effects.decompose_effects`` and ``B`` feeds
-``module_finder.interpret.loadings``, so every method is interpreted and scored
+``Z`` feeds ``extract.interpret.effects.decompose_effects`` and ``B`` feeds
+``extract.interpret.loadings``, so every method is interpreted and scored
 by identical code.
 """
 

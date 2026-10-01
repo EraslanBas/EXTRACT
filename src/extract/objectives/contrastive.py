@@ -20,7 +20,7 @@ marginals, and per-gene SD spans ~5.4e4x on these matrices, so a single
 threshold then separates real from shuffled: separability is d = 0.59 for
 within-row shuffling against d = 0.00 for column shuffling.
 
-See ``docs/paper/modulefinder.pdf`` sections 4.1 and 6.
+See the method paper sections 4.1 and 6.
 """
 
 from __future__ import annotations
@@ -32,7 +32,7 @@ import torch
 import torch.nn.functional as F
 
 #: The two strategies of the spec. Names match
-#: :data:`module_finder.data.augment.STRATEGIES` so a sampled negative and a
+#: :data:`extract.data.augment.STRATEGIES` so a sampled negative and a
 #: pre-built augmented table mean the same thing. No strategy assumes a
 #: reference context (vehicle, untreated): contexts are symmetric.
 STRATEGIES = ("same_s_other_pert", "same_s_other_context")

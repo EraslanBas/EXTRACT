@@ -47,13 +47,13 @@ import torch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from module_finder import paths
-from module_finder.data.augment import make_split
-from module_finder.de import load_matrices
-from module_finder.evaluation.stability import match_factors
-from module_finder.objectives import StratifiedNegativeSampler
-from module_finder.objectives.reconstruction import precision_weights
-from module_finder.train import TrainConfig, evaluate, fit, prepare
+from extract import paths
+from extract.data.augment import make_split
+from extract.de import load_matrices
+from extract.evaluation.stability import match_factors
+from extract.objectives import StratifiedNegativeSampler
+from extract.objectives.reconstruction import precision_weights
+from extract.train import TrainConfig, evaluate, fit, prepare
 
 
 def subspace_overlap(B0: np.ndarray, B1: np.ndarray) -> tuple[float, np.ndarray]:

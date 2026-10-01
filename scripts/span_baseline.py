@@ -26,9 +26,9 @@ import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from module_finder import paths
-from module_finder.de import load_matrices
-from module_finder.evaluation.span import _pca_basis, span_residual
+from extract import paths
+from extract.de import load_matrices
+from extract.evaluation.span import _pca_basis, span_residual
 
 
 def main() -> None:

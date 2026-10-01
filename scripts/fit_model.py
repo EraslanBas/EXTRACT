@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-"""Fit ModuleFinder on a saved split (scripts/build_split.py).
+"""Fit EXTRACT on a saved split (scripts/build_split.py).
 
-Implements docs/paper/modulefinder.pdf.
+Implements the method paper.
 
     python scripts/fit_model.py --n-factors 24 --alpha 1.0 --beta 0 --n-subsamples 10
 
@@ -18,7 +18,7 @@ Data discipline:
   sets their share of the negatives.
 
 Run more than one ``--seed``: cross-seed reproducibility of B under Hungarian
-matching (module_finder.evaluation.stability) is the acceptance evidence.
+matching (extract.evaluation.stability) is the acceptance evidence.
 """
 
 from __future__ import annotations
@@ -34,17 +34,17 @@ import pandas as pd
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from module_finder import paths
-from module_finder.data import mask_coverage
-from module_finder.data.splits import (
+from extract import paths
+from extract.data import mask_coverage
+from extract.data.splits import (
     load_partition,
     split_val_per_perturbation,
     subsample_mask,
     thin_synthetic,
 )
-from module_finder.objectives import DEFAULT_WEIGHTS, StratifiedNegativeSampler
-from module_finder.objectives.reconstruction import precision_weights
-from module_finder.train import TrainConfig, encode, evaluate, fit, prepare
+from extract.objectives import DEFAULT_WEIGHTS, StratifiedNegativeSampler
+from extract.objectives.reconstruction import precision_weights
+from extract.train import TrainConfig, encode, evaluate, fit, prepare
 
 
 def build_argparser() -> argparse.ArgumentParser:
@@ -53,7 +53,7 @@ def build_argparser() -> argparse.ArgumentParser:
     p.add_argument("--split-dir", type=Path,
                    default=paths.root() / "splits" / "pair_seed0")
     p.add_argument("--out-dir", type=Path, default=None,
-                   help="default: $MODULEFINDER_ROOT/models/<split name>")
+                   help="default: $EXTRACT_ROOT/models/<split name>")
     p.add_argument("--contexts", nargs="+", default=None,
                    help="default: every context in the split")
 

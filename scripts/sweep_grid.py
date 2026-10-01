@@ -23,13 +23,13 @@ from pathlib import Path
 import numpy as np, pandas as pd, torch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
-from module_finder import paths
-from module_finder.data.splits import (_pair_key, load_partition,
+from extract import paths
+from extract.data.splits import (_pair_key, load_partition,
                                        split_val_per_perturbation,
                                        subsample_mask, thin_synthetic)
-from module_finder.objectives import StratifiedNegativeSampler
-from module_finder.objectives.reconstruction import precision_weights
-from module_finder.train import TrainConfig, evaluate, fit, prepare
+from extract.objectives import StratifiedNegativeSampler
+from extract.objectives.reconstruction import precision_weights
+from extract.train import TrainConfig, evaluate, fit, prepare
 
 METRICS = ("disc", "recon", "recon_measured", "recon_synth", "accuracy",
            "synth_accuracy", "disc_synth", "span_residual_median",

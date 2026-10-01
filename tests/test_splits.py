@@ -8,7 +8,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from module_finder.data.splits import (
+from extract.data.splits import (
     build_split,
     draw_test_pairs,
     load_partition,

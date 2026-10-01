@@ -1,7 +1,7 @@
-# ModuleFinder design
+# EXTRACT design
 
 The method is described page by page on the documentation site
-(`docs/source/method/`, published at https://eraslanbas.github.io/ModuleFinder/).
+(`docs/source/method/`, published at https://eraslanbas.github.io/EXTRACT/).
 Section numbers below refer to the method paper, which is not part of this
 repository.
 
@@ -9,7 +9,7 @@ repository.
 
 | paper | code |
 |---|---|
-| §2 rows, Welch + `ashr` | `module_finder.de` (`ComputeSE.py`, `run_ashr_on_chunk.R`, `shards.py`, `matrices.py`) |
+| §2 rows, Welch + `ashr` | `extract.de` (`ComputeSE.py`, `run_ashr_on_chunk.R`, `shards.py`, `matrices.py`) |
 | §3.1 eq. (2) the tied projection `z = x B⁺` | `models.loadings.GlobalLoadings.project` |
 | §3.2 eq. (3)–(5) masked projection, Sherman–Morrison | `models.loadings.GlobalLoadings.project`, `data.ontarget.on_target_index` |
 | §3.3 eq. (6)–(8) the per-component head | `models.heads.PerComponentHead` |

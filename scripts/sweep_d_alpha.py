@@ -25,14 +25,14 @@ from pathlib import Path
 import numpy as np, pandas as pd, torch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
-from module_finder import paths
-from module_finder.data import apply_split, load_shuffled, mask_coverage
-from module_finder.data import apply_gene_list, load_gene_list
-from module_finder.data.augment import make_split
-from module_finder.de import load_matrices
-from module_finder.objectives import StratifiedNegativeSampler
-from module_finder.objectives.reconstruction import precision_weights
-from module_finder.train import TrainConfig, evaluate, fit, prepare
+from extract import paths
+from extract.data import apply_split, load_shuffled, mask_coverage
+from extract.data import apply_gene_list, load_gene_list
+from extract.data.augment import make_split
+from extract.de import load_matrices
+from extract.objectives import StratifiedNegativeSampler
+from extract.objectives.reconstruction import precision_weights
+from extract.train import TrainConfig, evaluate, fit, prepare
 
 
 def main() -> int:

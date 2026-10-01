@@ -7,11 +7,11 @@ large_storage:
 /large_storage/ctc/beraslan/ModuleFinder/
 ```
 
-Override with `MODULEFINDER_ROOT`. Resolve it in Python via
-`module_finder.paths`; never hard-code a path in a script or notebook.
+Override with `EXTRACT_ROOT`. Resolve it in Python via
+`extract.paths`; never hard-code a path in a script or notebook.
 
 ```python
-from module_finder import paths
+from extract import paths
 paths.root()       # /large_storage/ctc/beraslan/ModuleFinder
 paths.matrices()   # .../matrices
 ```
@@ -30,7 +30,7 @@ paths.matrices()   # .../matrices
 ## Loading
 
 ```python
-from module_finder.de import load_matrices
+from extract.de import load_matrices
 
 X, meta = load_matrices()                      # all contexts, all 11 rows each
 X, meta = load_matrices(variant="main")         # one row per (perturbation, context)
@@ -55,6 +55,6 @@ python scripts/build_augmented_data.py
 ## History
 
 `data/` and `results/` used to sit inside the repo, which meant two directories
-named `ModuleFinder` holding unrelated things — the code repo with a `data/` of
+named `EXTRACT` holding unrelated things — the code repo with a `data/` of
 simulator artifacts, and the large_storage tree with the screen outputs. They
 were consolidated here on 2026-09-16.

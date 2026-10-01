@@ -1,7 +1,7 @@
 """Training objectives: contrastive discrimination + reconstruction anchor.
 
 ``L_disc`` picks the rotation; ``L_recon`` picks the subspace. The optional
-total-correlation term is in :mod:`~module_finder.objectives.total_correlation`
+total-correlation term is in :mod:`~extract.objectives.total_correlation`
 and is off by default.
 """
 

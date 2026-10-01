@@ -18,7 +18,7 @@ class MOFABaseline:
     """MOFA+ via ``mofapy2``.
 
     A fitted model and its outputs already exist under ``<root>/results/mofa/``
-    (see :mod:`module_finder.paths`)
+    (see :mod:`extract.paths`)
     (``mofa_model.hdf5``, ``loadings_{A,B,C}.parquet``), produced by
     ``notebooks/baselines/10_MOFA_PerturbSeq.ipynb``. Use
     :meth:`from_hdf5` to wrap those rather than refitting.
@@ -113,7 +113,7 @@ class MuVIBaseline:
 class SVAEPlusBaseline:
     """sVAE+ (Lopez et al., CLeaR 2023) -- sparse mechanism shift.
 
-    The closest published relative of module_finder: perturbation identity as
+    The closest published relative of extract: perturbation identity as
     the auxiliary variable, with a sparse perturbation x latent mask. Two
     differences that matter for a fair comparison:
 
@@ -121,7 +121,7 @@ class SVAEPlusBaseline:
       rather than the LFC matrices;
     * its decoder is nonlinear (``DecoderSCVI`` with a softmax scale
       activation), so its factor->gene map is *not* global and its loadings are
-      local, unlike module_finder's ``B``.
+      local, unlike extract's ``B``.
 
     Interpretable parameters, for reference:
     ``sigmoid(module.action_prior_logit_weight)`` is the [n_perturbations,

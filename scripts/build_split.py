@@ -10,7 +10,7 @@ full-data rows only (|logFC| > ln 1.2 in more than 150 pairs) and applied to
 both partitions; synthetic rows are shuffled over each context's rows before
 the split (--shuffle-within context, default) or within (partition, context)
 (--shuffle-within partition). See
-module_finder.data.splits for the layout.
+extract.data.splits for the layout.
 """
 
 from __future__ import annotations
@@ -24,8 +24,8 @@ import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from module_finder import paths
-from module_finder.data.splits import build_split
+from extract import paths
+from extract.data.splits import build_split
 
 
 def main() -> None:
@@ -33,7 +33,7 @@ def main() -> None:
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--matrices", type=Path, default=paths.matrices())
     p.add_argument("--out-dir", type=Path, default=None,
-                   help="default: $MODULEFINDER_ROOT/splits/pair_seed<split-seed>")
+                   help="default: $EXTRACT_ROOT/splits/pair_seed<split-seed>")
     p.add_argument("--test-frac", type=float, default=0.1)
     p.add_argument("--split-seed", type=int, default=0)
     p.add_argument("--min-affected", type=int, default=151,

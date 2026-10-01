@@ -37,7 +37,7 @@ def affected_counts(
     ----------
     X
         ``[rows x genes]``, as returned by
-        :func:`module_finder.de.load_matrices`.
+        :func:`extract.de.load_matrices`.
     meta
         Row metadata with ``variant``; must align row-for-row with ``X``.
     threshold

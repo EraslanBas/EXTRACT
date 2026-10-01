@@ -14,7 +14,7 @@ cancel it as a nuisance (Haufe et al. 2014). Tying removes the question --
 ``x`` is therefore never on a generative path. It is projected so the
 discriminator can judge it, and it is the regression target.
 
-See ``docs/paper/modulefinder.pdf`` sections 3.1-3.2 for the derivation; the
+See the method paper sections 3.1-3.2 for the derivation; the
 equation numbers in the comments below refer to it.
 """
 

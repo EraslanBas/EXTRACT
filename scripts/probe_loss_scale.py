@@ -22,12 +22,12 @@ from pathlib import Path
 import numpy as np, pandas as pd, torch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
-from module_finder import paths
-from module_finder.data.splits import (_pair_key, load_partition,
+from extract import paths
+from extract.data.splits import (_pair_key, load_partition,
                                        split_val_per_perturbation,
                                        subsample_mask, thin_synthetic)
-from module_finder.models.loadings import NO_MASK
-from module_finder.train import TrainConfig, fit, prepare
+from extract.models.loadings import NO_MASK
+from extract.train import TrainConfig, fit, prepare
 
 
 def main() -> int:

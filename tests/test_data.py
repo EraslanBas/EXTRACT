@@ -4,7 +4,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from module_finder.data import build_pseudoreplicates
+from extract.data import build_pseudoreplicates
 
 
 def _adata(n=3000, seed=0):
@@ -71,7 +71,7 @@ def test_impossible_floor_raises():
 
 def test_shuffle_matrix_frac_leaves_the_rest_real():
     import numpy as np
-    from module_finder.data.augment import shuffle_matrix
+    from extract.data.augment import shuffle_matrix
 
     X = np.arange(200, dtype=float).reshape(20, 10)
     out = shuffle_matrix(X, seed=0, frac=0.3)
@@ -88,7 +88,7 @@ def test_shuffle_matrix_frac_one_is_unchanged_behaviour():
     """frac=1.0 must not consume RNG differently, or previously generated
     augmented files stop being reproducible."""
     import numpy as np
-    from module_finder.data.augment import shuffle_matrix
+    from extract.data.augment import shuffle_matrix
 
     X = np.arange(120, dtype=float).reshape(12, 10)
     a = shuffle_matrix(X, seed=7)
@@ -101,7 +101,7 @@ def test_shuffle_matrix_frac_one_is_unchanged_behaviour():
 def test_shuffle_matrix_rejects_bad_frac():
     import numpy as np
     import pytest
-    from module_finder.data.augment import shuffle_matrix
+    from extract.data.augment import shuffle_matrix
 
     for bad in (0.0, -0.1, 1.5):
         with pytest.raises(ValueError, match="frac"):
@@ -113,7 +113,7 @@ def test_affected_counts_uses_main_rows_only():
     multiply every gene's count without adding information."""
     import numpy as np
     import pandas as pd
-    from module_finder.data import affected_counts
+    from extract.data import affected_counts
 
     X = pd.DataFrame(
         [[0.5, 0.0], [0.5, 0.0], [0.5, 0.0], [0.0, 0.4]],
@@ -130,7 +130,7 @@ def test_affected_counts_uses_main_rows_only():
 def test_select_genes_applies_the_minimum():
     import numpy as np
     import pandas as pd
-    from module_finder.data import select_genes
+    from extract.data import select_genes
 
     X = pd.DataFrame(
         [[0.5, 0.5, 0.0], [0.5, 0.0, 0.0], [0.5, 0.0, 0.05]],
@@ -145,7 +145,7 @@ def test_affected_counts_rejects_misaligned_meta():
     import numpy as np
     import pandas as pd
     import pytest
-    from module_finder.data import affected_counts
+    from extract.data import affected_counts
 
     X = pd.DataFrame([[0.5], [0.5]], columns=["A"])
     with pytest.raises(ValueError, match="align"):
@@ -155,7 +155,7 @@ def test_affected_counts_rejects_misaligned_meta():
 def test_permute_labels_only_names_observed_pairs():
     """A negative must never name a (p, c) pair that was not measured, or
     tables built from full metadata would name held-out pairs."""
-    from module_finder.data.augment import permute_labels
+    from extract.data.augment import permute_labels
 
     drugs = ["DrugX", "DrugY"]
     rows = []

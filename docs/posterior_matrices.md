@@ -5,7 +5,7 @@ times** — once from all its cells, plus one row per subsample — with the cel
 count behind every row recorded.
 
 This wraps the ChemoGeneticScreens pipeline, whose four scripts are vendored
-unchanged in `src/module_finder/de/`:
+unchanged in `src/extract/de/`:
 
 | step | script | what it does |
 |---|---|---|
@@ -159,7 +159,7 @@ from a recomputation. Intermediates are kept, so a re-run skips
 For programmatic use — same mechanism, same subprocess isolation:
 
 ```python
-from module_finder.de import run_screen
+from extract.de import run_screen
 
 summary = run_screen(
     screen_dir="/processed_datasets/VCI/ChemoGenetic_H1_Basak",

@@ -1,4 +1,4 @@
-"""module_finder -- identifiable gene programs from perturbation x context screens.
+"""extract -- identifiable gene programs from perturbation x context screens.
 
 The model, in one line:
 
@@ -34,7 +34,7 @@ The objective is to recover the factors that *generated* the data, not to
 predict responses of unseen perturbations.
 
 Full specification, with all mathematical and architectural detail:
-``docs/paper/modulefinder.pdf``.
+the method paper.
 """
 
 __version__ = "0.1.0.dev0"

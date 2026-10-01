@@ -1,4 +1,4 @@
-"""Sphinx configuration for the ModuleFinder documentation site.
+"""Sphinx configuration for the EXTRACT documentation site.
 
 https://www.sphinx-doc.org/en/master/usage/configuration.html
 """
@@ -12,12 +12,12 @@ sys.path.insert(0, os.path.abspath("../../src"))
 
 # -- Project information -----------------------------------------------------
 
-project = "ModuleFinder"
+project = "EXTRACT"
 author = "Basak Eraslan"
 copyright = f"{datetime.now():%Y}, {author}"
 
 try:  # keep the docs version in lockstep with the package
-    from module_finder import __version__ as release
+    from extract import __version__ as release
 except Exception:  # pragma: no cover - docs can build without the deps
     release = "0.1.0.dev0"
 version = release
@@ -27,7 +27,6 @@ version = release
 extensions = [
     "myst_nb",
     "sphinx_copybutton",
-    "sphinx_design",
 ]
 
 templates_path = ["_templates"]
@@ -63,14 +62,14 @@ html_title = f"{project} {version}"
 html_show_sourcelink = False
 
 html_theme_options = {
-    "github_url": "https://github.com/EraslanBas/ModuleFinder",
+    "github_url": "https://github.com/EraslanBas/EXTRACT",
     "navbar_end": ["theme-switcher", "navbar-icon-links"],
     "navbar_align": "left",
     "show_toc_level": 2,
     "show_nav_level": 1,
     "header_links_before_dropdown": 6,
     "use_edit_page_button": True,
-    "show_prev_next": True,
+    "show_prev_next": False,
     "secondary_sidebar_items": ["page-toc", "edit-this-page"],
     "footer_start": ["copyright"],
     "footer_end": ["sphinx-version"],
@@ -78,13 +77,11 @@ html_theme_options = {
 
 html_context = {
     "github_user": "EraslanBas",
-    "github_repo": "ModuleFinder",
+    "github_repo": "EXTRACT",
     "github_version": "main",
     "doc_path": "docs/source",
     "default_mode": "auto",
 }
 
-html_sidebars = {
-    "index": [],
-    "installation": [],
-}
+# One page: no left navigation, the page's own contents on the right.
+html_sidebars = {"**": []}

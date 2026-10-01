@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""CLI for module_finder.data.build_augmented.
+"""CLI for extract.data.build_augmented.
 
 Writes both kinds of augmented data next to the real matrices:
 label permutations (small, pooled) and shuffled matrices (large, per context).
@@ -16,9 +16,9 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from module_finder import paths
+from extract import paths
 
-from module_finder.data import STRATEGIES, build_augmented
+from extract.data import STRATEGIES, build_augmented
 
 
 def main() -> int:

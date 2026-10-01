@@ -1,4 +1,4 @@
-"""The implementation must match docs/paper/modulefinder.pdf, equation by equation."""
+"""The implementation must match the method paper, equation by equation."""
 
 from __future__ import annotations
 
@@ -7,17 +7,17 @@ import pandas as pd
 import pytest
 import torch
 
-from module_finder.data.ontarget import mask_coverage, on_target_index
-from module_finder.evaluation import span_residual
-from module_finder.models import NO_MASK, GlobalLoadings, PerComponentHead
-from module_finder.models.label_net import FactorizedLabelNet
-from module_finder.objectives import (
+from extract.data.ontarget import mask_coverage, on_target_index
+from extract.evaluation import span_residual
+from extract.models import NO_MASK, GlobalLoadings, PerComponentHead
+from extract.models.label_net import FactorizedLabelNet
+from extract.objectives import (
     DEFAULT_WEIGHTS,
     StratifiedNegativeSampler,
     contrastive_loss,
     precision_weights,
 )
-from module_finder.train import TrainConfig, fit
+from extract.train import TrainConfig, fit
 
 
 # ---------------------------------------------------------------- eq. (2)/(4)
@@ -454,7 +454,7 @@ def _toy_meta(n_pert=12, n_ctx=4, n_strata=3):
 
 def test_fit_trains_only_on_train_rows():
     """A held-out pair must never appear in a training batch."""
-    from module_finder.data.augment import make_split
+    from extract.data.augment import make_split
 
     meta = _toy_meta()
     X, p, c, s, n = _toy_dataset(n_pert=12, n_ctx=4, n_strata=3, n_genes=40)
@@ -476,7 +476,7 @@ def test_fit_trains_only_on_train_rows():
 
 
 def test_all_eleven_samples_of_a_held_out_pair_move_together():
-    from module_finder.data.augment import make_split
+    from extract.data.augment import make_split
 
     meta = _toy_meta(n_pert=20, n_ctx=3, n_strata=11)
     split = make_split(meta, level="pair", test_frac=0.15, seed=1)
@@ -497,8 +497,8 @@ def test_fit_rejects_a_split_smaller_than_one_batch():
 
 
 def test_evaluate_returns_the_documented_keys():
-    from module_finder.objectives import StratifiedNegativeSampler
-    from module_finder.train import evaluate
+    from extract.objectives import StratifiedNegativeSampler
+    from extract.train import evaluate
 
     X, p, c, s, n = _toy_dataset(n_pert=10, n_ctx=3, n_strata=3, n_genes=30)
     cfg = TrainConfig(n_factors=4, epochs=2, batch_size=32, log_every=0,
@@ -525,7 +525,7 @@ def test_evaluate_never_scores_synthetic_rows_as_positives():
     """Synthetic rows are negatives under their own label. The permuted-label
     metrics must be exactly what the measured rows alone give, and the
     synthetic rows must be reported on their own."""
-    from module_finder.train import evaluate
+    from extract.train import evaluate
 
     X, p, c, s, n = _toy_dataset(n_pert=10, n_ctx=3, n_strata=3, n_genes=30)
     cfg = TrainConfig(n_factors=4, epochs=2, batch_size=32, log_every=0,
@@ -562,7 +562,7 @@ def test_evaluate_never_scores_synthetic_rows_as_positives():
 
 
 def test_three_way_split_is_disjoint_and_complete():
-    from module_finder.data.augment import make_split
+    from extract.data.augment import make_split
 
     meta = _toy_meta(n_pert=40, n_ctx=4, n_strata=11)
     split = make_split(meta, level="pair", test_frac=0.1, val_frac=0.1, seed=0)
@@ -575,7 +575,7 @@ def test_three_way_split_is_disjoint_and_complete():
 
 
 def test_three_way_split_keeps_pairs_whole():
-    from module_finder.data.augment import make_split
+    from extract.data.augment import make_split
 
     meta = _toy_meta(n_pert=30, n_ctx=3, n_strata=11)
     split = make_split(meta, level="pair", test_frac=0.12, val_frac=0.12, seed=3)
@@ -591,7 +591,7 @@ def test_three_way_split_keeps_pairs_whole():
 
 
 def test_split_rejects_impossible_fractions():
-    from module_finder.data.augment import make_split
+    from extract.data.augment import make_split
 
     meta = _toy_meta(n_pert=4, n_ctx=1, n_strata=2)
     with pytest.raises(ValueError, match="would hold out"):
@@ -603,7 +603,7 @@ def test_early_stopping_restores_the_best_epoch():
     for BOTH selection rules -- "accuracy" maximises, "total" (eq. 12, the
     quantity actually minimised) minimises and therefore stops at the
     overfitting onset. The two can pick different epochs."""
-    from module_finder.data.augment import make_split
+    from extract.data.augment import make_split
 
     meta = _toy_meta(n_pert=16, n_ctx=4, n_strata=3)
     X, p, c, s, n = _toy_dataset(n_pert=16, n_ctx=4, n_strata=3, n_genes=40)
@@ -624,7 +624,7 @@ def test_early_stopping_restores_the_best_epoch():
 def test_total_is_the_objective_on_both_train_and_val():
     """`total` must equal disc + alpha*recon on both sides, so the two curves
     are the same quantity and their crossing is meaningful."""
-    from module_finder.data.augment import make_split
+    from extract.data.augment import make_split
 
     meta = _toy_meta(n_pert=16, n_ctx=4, n_strata=3)
     X, p, c, s, n = _toy_dataset(n_pert=16, n_ctx=4, n_strata=3, n_genes=40)
@@ -805,7 +805,7 @@ def test_apply_split_keeps_synthetic_rows_with_their_real_twin():
     """A synthetic row inherits a real pair's label, so it must land in the
     SAME half. Re-drawing the split over the combined frame would scatter the
     twins and leak a held-out pair's synthetic copy into training."""
-    from module_finder.data.augment import apply_split, make_split
+    from extract.data.augment import apply_split, make_split
 
     rng = np.random.default_rng(0)
     perts = [f"P{i:03d}" for i in range(60)]
@@ -838,7 +838,7 @@ def test_balance_negatives_matches_negative_count_to_positives():
     """|permuted| + |synthetic| must equal |positives|. With an equal number of
     synthetic rows that means every permuted negative is dropped; with half as
     many, half are kept."""
-    from module_finder.train import ModuleFinder
+    from extract.train import Extract
     rng = np.random.default_rng(0)
     n, G = 256, 16
     X = rng.normal(size=(n, G)).astype(np.float32)
@@ -846,7 +846,7 @@ def test_balance_negatives_matches_negative_count_to_positives():
          rng.integers(0, 3, n), rng.integers(50, 300, n).astype(float)]
 
     seen = {}
-    orig = ModuleFinder.score
+    orig = Extract.score
     def spy(self, z, p_i, c_i):
         seen["n"] = seen.get("n", 0) + len(z)
         return orig(self, z, p_i, c_i)
@@ -858,11 +858,11 @@ def test_balance_negatives_matches_negative_count_to_positives():
         cfg = TrainConfig(n_factors=3, epochs=1, batch_size=n + n_synth,
                           seed=0, log_every=0, eval_every=0, patience=0)
         seen.clear()
-        ModuleFinder.score = spy
+        Extract.score = spy
         try:
             fit(np.vstack([X, Xf]), *[cat(v) for v in a], config=cfg, is_real=flag)
         finally:
-            ModuleFinder.score = orig
+            Extract.score = orig
         # scored = positives(n) + permuted(~expect_frac*n) + synthetic(n_synth)
         expected = n + expect_frac * n + n_synth
         assert abs(seen["n"] - expected) < 0.25 * n, (n_synth, seen["n"], expected)
@@ -888,7 +888,7 @@ def test_single_context_perturbations_always_train():
     """A perturbation with one pair has nothing left to train e_p on if that
     pair is held out, so its row is unpredictable by construction. Those pairs
     must stay in train."""
-    from module_finder.data.augment import make_split
+    from extract.data.augment import make_split
 
     rows = []
     for i in range(200):                       # 12 contexts each
@@ -923,7 +923,7 @@ def test_evaluate_takes_its_device_from_the_model_not_the_data():
     raises. Checked on CPU by putting the model on a meta-free device and
     asserting evaluate() uses `next(model.parameters()).device`."""
     import inspect
-    from module_finder import train as T
+    from extract import train as T
     src_ = inspect.getsource(T.evaluate)
     assert "next(model.parameters()).device" in src_, \
         "evaluate() must take its device from the model"
@@ -938,7 +938,7 @@ def test_min_epochs_keeps_training_but_still_restores_the_best_epoch():
     """min_epochs decides when training STOPS, not which state is kept: a run
     whose validation bottoms out early must still train to min_epochs, and
     still restore the early best epoch."""
-    from module_finder.data.augment import make_split
+    from extract.data.augment import make_split
 
     meta = _toy_meta(n_pert=16, n_ctx=4, n_strata=3)
     X, p, c, s, n = _toy_dataset(n_pert=16, n_ctx=4, n_strata=3, n_genes=40)
@@ -956,7 +956,7 @@ def test_min_epochs_keeps_training_but_still_restores_the_best_epoch():
 def test_on_eval_snapshots_B_at_every_evaluation():
     """on_eval fires once per validation pass with the live model, so a copy
     of B taken there is the B of that epoch -- not the restored one."""
-    from module_finder.data.augment import make_split
+    from extract.data.augment import make_split
 
     meta = _toy_meta(n_pert=16, n_ctx=4, n_strata=3)
     X, p, c, s, n = _toy_dataset(n_pert=16, n_ctx=4, n_strata=3, n_genes=40)

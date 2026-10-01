@@ -90,7 +90,7 @@ class PerComponentHead(nn.Module):
             [batch, n_factors] encoder output.
         lam
             [batch, n_factors, n_basis] label-derived coefficients from
-            :class:`~module_finder.models.label_net.FactorizedLabelNet`.
+            :class:`~extract.models.label_net.FactorizedLabelNet`.
 
         Returns
         -------

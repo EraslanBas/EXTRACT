@@ -3,7 +3,7 @@ requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "modulefinder-screens"
+name = "extract-screens"
 version = "0.1.0.dev0"
 description = "Identifiable latent factors from perturbation x context screens"
 requires-python = ">=3.10"
@@ -22,11 +22,11 @@ dependencies = [
 baselines = ["mofapy2", "h5py"]
 dev = ["pytest>=7", "ruff"]
 
-# NOTE: the import name is `module_finder`, not `modulefinder` -- the latter is
-# a Python standard-library module and would be shadowed.
+# The distribution is `extract-screens`; the import name is `extract`. An
+# unrelated package called `extract` exists on PyPI -- do not install both.
 [tool.setuptools.packages.find]
 where = ["src"]
-include = ["module_finder*", "perturbseq_sim*", "baselines*"]
+include = ["extract*", "perturbseq_sim*", "baselines*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

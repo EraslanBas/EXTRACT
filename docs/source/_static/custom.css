@@ -1,31 +1,26 @@
-/* ModuleFinder documentation - theme overrides.
-   Small on purpose; the pydata theme handles light/dark, and every colour here
-   is defined for both schemes. */
+/* EXTRACT documentation - small theme overrides.
+   Every colour is defined for both the light and the dark scheme. */
 
 html[data-theme="light"] {
-    --mf-accent: #2a6f4e;
-    --mf-accent-soft: #e9f3ee;
-    --mf-border: #d7dde3;
+    --ex-accent: #2c56c9;
+    --ex-accent-soft: #dfe6f8;
+    --ex-loss: #b8453a;
+    --ex-loss-soft: #f5e1de;
+    --ex-box: #ffffff;
+    --ex-rule: #c9cfd6;
+    --ex-ink: #1c232b;
+    --ex-muted: #5a6570;
 }
 
 html[data-theme="dark"] {
-    --mf-accent: #74c39b;
-    --mf-accent-soft: #15241d;
-    --mf-border: #2f3a42;
-}
-
-.bd-main .bd-content .sd-card {
-    border: 1px solid var(--mf-border);
-    transition: border-color 0.15s ease, transform 0.15s ease;
-}
-
-.bd-main .bd-content .sd-card:hover {
-    border-color: var(--mf-accent);
-    transform: translateY(-2px);
-}
-
-.sd-card-title {
-    font-weight: 600;
+    --ex-accent: #8aa8ff;
+    --ex-accent-soft: #1f2b4a;
+    --ex-loss: #ec8a7f;
+    --ex-loss-soft: #3a2220;
+    --ex-box: #1c2229;
+    --ex-rule: #3a4550;
+    --ex-ink: #e3e7ea;
+    --ex-muted: #9aa6b1;
 }
 
 /* Wide tables scroll instead of widening the page. */
@@ -35,18 +30,23 @@ html[data-theme="dark"] {
     max-width: 100%;
 }
 
-.admonition.caution {
-    border-left-color: var(--mf-accent);
+/* The forward-pass diagram. */
+.ex-figure {
+    overflow-x: auto;
+    margin: 1.2em 0 0.4em;
 }
-
-.sd-card .highlight pre {
-    font-size: 0.85em;
-}
-
-/* The boxed model equation on the landing page. */
-.mf-equation {
-    background: var(--mf-accent-soft);
-    border-left: 3px solid var(--mf-accent);
-    padding: 0.4em 1em;
-    margin: 1em 0;
+.ex-figure svg { max-width: 100%; height: auto; }
+.ex-figure svg text { font-family: var(--pst-font-family-base); fill: var(--ex-ink); }
+.ex-figure svg .box  { fill: var(--ex-box); stroke: var(--ex-rule); stroke-width: 1.4; }
+.ex-figure svg .boxB { fill: var(--ex-accent-soft); stroke: var(--ex-accent); stroke-width: 1.8; }
+.ex-figure svg .loss { fill: var(--ex-loss-soft); stroke: var(--ex-loss); stroke-width: 1.4; }
+.ex-figure svg .ln   { stroke: var(--ex-muted); stroke-width: 1.5; fill: none; }
+.ex-figure svg .lnB  { stroke: var(--ex-accent); stroke-width: 1.5; fill: none; stroke-dasharray: 5 4; }
+.ex-figure svg .sub  { font-size: 10.5px; fill: var(--ex-muted); }
+.ex-figure svg .ah   { fill: var(--ex-muted); }
+.ex-figure svg .ahB  { fill: var(--ex-accent); }
+.ex-caption {
+    font-size: 0.9em;
+    color: var(--pst-color-text-muted);
+    margin-bottom: 1.5em;
 }

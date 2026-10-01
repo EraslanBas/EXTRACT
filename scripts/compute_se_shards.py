@@ -25,11 +25,11 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from module_finder import paths
+from extract import paths
 
 import pandas as pd
 
-from module_finder.de import compute_se_for_shard, find_shards, prepare_control_subset
+from extract.de import compute_se_for_shard, find_shards, prepare_control_subset
 
 CHEMOGENETIC_CONTEXTS = [
     "DMSO_round2", "DMSO_round2_batch2",

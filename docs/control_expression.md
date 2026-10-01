@@ -1,5 +1,5 @@
 ---
-title: "How control expression is generated in ModuleFinder"
+title: "How control expression is generated in EXTRACT"
 subtitle: "`SRC/ControlDataGenerator.py` — step-by-step derivation"
 date: ""
 geometry: "margin=2.2cm"

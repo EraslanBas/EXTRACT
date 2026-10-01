@@ -20,8 +20,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from module_finder import paths
-from module_finder.data import compute_gene_list, filter_summary
+from extract import paths
+from extract.data import compute_gene_list, filter_summary
 
 
 def main() -> None:

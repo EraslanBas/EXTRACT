@@ -1,8 +1,8 @@
-# ModuleFinder
+# EXTRACT
 
 Gene programs from perturbation × context screens.
 
-ModuleFinder fits one global matrix of gene programs `B` (factors × genes) to a
+EXTRACT fits one global matrix of gene programs `B` (factors × genes) to a
 screen in which every perturbation is measured in several contexts (drug
 backgrounds, cell lines, timepoints, donors). Factor activations are the masked
 least-squares projection of each response onto `B`, so there is one map between
@@ -14,13 +14,13 @@ where reconstruction fixes the subspace of the programs and a per-component
 contrastive head (does this response belong to this perturbation in this
 context?) fixes their orientation inside it.
 
-**Documentation:** https://eraslanbas.github.io/ModuleFinder/ — the method,
+**Documentation:** https://eraslanbas.github.io/EXTRACT/ — the method,
 page by page.
 
 ## Layout
 
 ```
-src/module_finder/      the method
+src/extract/      the method
     de/                 shrunken-logFC pipeline (Welch + ashr), per context
     data/               gene filter, on-target mask, leak-free splits, synthetic rows
     models/             global loadings B, per-component head, label network
@@ -36,8 +36,7 @@ notebooks/              simulator and analysis notebooks
 tests/                  unit tests, no screen data needed
 ```
 
-The import name is **`module_finder`**, not `modulefinder` (a Python
-standard-library module).
+The distribution is `extract-screens`; the import name is **`extract`**.
 
 ## Install
 
@@ -51,8 +50,8 @@ Building logFC matrices from single-cell data additionally needs R with `ashr`.
 ## Data
 
 The repository holds code only. Data artifacts (matrices, splits, sweep
-outputs) live under `$MODULEFINDER_ROOT`; resolve paths with
-`module_finder.paths`. See [`docs/data_layout.md`](docs/data_layout.md).
+outputs) live under `$EXTRACT_ROOT`; resolve paths with
+`extract.paths`. See [`docs/data_layout.md`](docs/data_layout.md).
 
 ## Documentation
 

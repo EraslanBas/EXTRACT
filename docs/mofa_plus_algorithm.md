@@ -16,7 +16,7 @@ It extends the original MOFA (Argelaguet et al., *MSB*, 2018) with an
 explicit *group* axis (so factors can be active in some groups and not
 others), per-feature noise precisions, and stochastic / GPU options.
 
-In MOFA+ terminology applied to our ModuleFinder setup:
+In MOFA+ terminology applied to our EXTRACT setup:
 
 - **views** $m = 1, \dots, M$ — contexts A, B, C
 - **groups** $g = 1, \dots, G$ — a single group `all`

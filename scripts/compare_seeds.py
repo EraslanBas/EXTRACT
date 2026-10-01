@@ -29,8 +29,8 @@ import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from module_finder import paths
-from module_finder.evaluation.stability import match_factors, stability_across_seeds
+from extract import paths
+from extract.evaluation.stability import match_factors, stability_across_seeds
 
 
 def build_argparser() -> argparse.ArgumentParser:
