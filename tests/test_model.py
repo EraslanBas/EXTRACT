@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import numpy as np
+import pandas as pd
 import pytest
 import torch
 
@@ -11,6 +12,7 @@ from module_finder.evaluation import span_residual
 from module_finder.models import NO_MASK, GlobalLoadings, PerComponentHead
 from module_finder.models.label_net import FactorizedLabelNet
 from module_finder.objectives import (
+    DEFAULT_WEIGHTS,
     StratifiedNegativeSampler,
     contrastive_loss,
     precision_weights,
@@ -182,7 +184,7 @@ def _toy_labels(n_pert=12, n_ctx=4, n_strata=11):
     return np.array(p), np.array(c), np.array(s)
 
 
-def _sampler(weights=None, vehicles=(0,)):
+def _sampler(weights=None):
     p, c, s = _toy_labels()
     return (
         StratifiedNegativeSampler(
@@ -191,7 +193,6 @@ def _sampler(weights=None, vehicles=(0,)):
             stratum=s,
             n_perturbations=12,
             n_contexts=4,
-            vehicle_context_idx=vehicles,
             **({"weights": weights} if weights else {}),
         ),
         p,
@@ -210,7 +211,7 @@ def test_negatives_never_equal_their_own_label():
 
 
 def test_other_pert_strategy_keeps_the_context():
-    sampler, p, c, _ = _sampler(weights={"same_s_other_pert": 1.0}, vehicles=())
+    sampler, p, c, _ = _sampler(weights={"same_s_other_pert": 1.0})
     rng = np.random.default_rng(1)
     rows = np.arange(500)
     neg_p, neg_c = sampler.sample(rows, rng)
@@ -219,7 +220,7 @@ def test_other_pert_strategy_keeps_the_context():
 
 
 def test_other_context_strategy_keeps_the_perturbation():
-    sampler, p, c, _ = _sampler(weights={"same_s_other_context": 1.0}, vehicles=())
+    sampler, p, c, _ = _sampler(weights={"same_s_other_context": 1.0})
     rng = np.random.default_rng(2)
     rows = np.arange(500)
     neg_p, neg_c = sampler.sample(rows, rng)
@@ -227,17 +228,44 @@ def test_other_context_strategy_keeps_the_perturbation():
     assert (neg_c != c[rows]).all()
 
 
-def test_against_vehicle_uses_a_vehicle_context():
-    sampler, _, _, _ = _sampler(weights={"against_vehicle": 1.0}, vehicles=(0, 1))
-    rng = np.random.default_rng(3)
-    rows = np.arange(400)
-    _, neg_c = sampler.sample(rows, rng)
-    assert set(np.unique(neg_c)).issubset({0, 1})
+def test_single_context_perturbation_swaps_the_other_axis():
+    """A perturbation with one observed context has no alternative context.
+    The sampler must swap its perturbation instead of drawing a context from
+    the full range, which would name an unobserved (possibly held-out) pair."""
+    # perturbation 0 only in context 0; perturbations 1-3 in contexts 0-2
+    rows = [(0, 0, s) for s in range(2)]
+    rows += [(pp, cc, s) for pp in (1, 2, 3) for cc in range(3) for s in range(2)]
+    P, C, S = (np.array(v) for v in zip(*rows))
+    sampler = StratifiedNegativeSampler(
+        perturbation_idx=P, context_idx=C, stratum=S,
+        n_perturbations=4, n_contexts=3,
+        weights={"same_s_other_context": 1.0},
+    )
+    observed = set(zip(P.tolist(), C.tolist()))
+    rng = np.random.default_rng(0)
+    for _ in range(50):
+        neg_p, neg_c = sampler.sample(np.arange(len(P)), rng)
+        named = set(zip(neg_p.tolist(), neg_c.tolist()))
+        assert named <= observed, f"unobserved pairs named: {named - observed}"
+        assert not ((neg_p == P) & (neg_c == C)).any()
+    # the single-context rows got a perturbation swap, context untouched
+    assert (neg_c[:2] == 0).all() and (neg_p[:2] != 0).all()
 
 
-def test_against_vehicle_requires_vehicle_indices():
+def test_label_with_no_observed_alternative_raises():
+    """If neither axis has an observed alternative there is no legal negative;
+    fail loudly rather than name an unobserved pair."""
+    sampler = StratifiedNegativeSampler(
+        perturbation_idx=np.array([0, 0]), context_idx=np.array([0, 0]),
+        stratum=np.array([0, 1]), n_perturbations=2, n_contexts=2,
+    )
+    with pytest.raises(ValueError, match="no observed alternative"):
+        sampler.sample(np.arange(2), np.random.default_rng(0))
+
+
+def test_unknown_strategy_is_rejected():
     p, c, s = _toy_labels()
-    with pytest.raises(ValueError, match="vehicle_context_idx"):
+    with pytest.raises(ValueError, match="unknown strategies"):
         StratifiedNegativeSampler(
             perturbation_idx=p,
             context_idx=c,
@@ -355,13 +383,12 @@ def test_fit_runs_and_reduces_both_terms():
     assert model.loading_matrix().shape == (5, X.shape[1])
 
 
-def test_fit_accepts_a_mask_and_a_vehicle_context():
+def test_fit_accepts_a_mask_and_custom_negative_weights():
     X, p, c, s, n = _toy_dataset(n_pert=12, n_genes=40)
     target_col = (p % 40).astype(np.int64)
     cfg = TrainConfig(
         n_factors=4, epochs=4, batch_size=48, log_every=0,
-        vehicle_context_idx=(0,),
-        negative_weights={"same_s_other_pert": 0.5, "against_vehicle": 0.5},
+        negative_weights={"same_s_other_pert": 0.8, "same_s_other_context": 0.2},
     )
     model, history = fit(X, p, c, s, n, target_col=target_col, config=cfg)
     assert np.isfinite(history[-1]["recon"])
@@ -491,6 +518,44 @@ def test_evaluate_returns_the_documented_keys():
         assert key in m, key
     assert 0.0 <= m["accuracy"] <= 1.0
     assert 0.0 <= m["span_residual_median"] <= 1.5
+    assert m["n_synthetic"] == 0 and np.isnan(m["synth_accuracy"])
+
+
+def test_evaluate_never_scores_synthetic_rows_as_positives():
+    """Synthetic rows are negatives under their own label. The permuted-label
+    metrics must be exactly what the measured rows alone give, and the
+    synthetic rows must be reported on their own."""
+    from module_finder.train import evaluate
+
+    X, p, c, s, n = _toy_dataset(n_pert=10, n_ctx=3, n_strata=3, n_genes=30)
+    cfg = TrainConfig(n_factors=4, epochs=2, batch_size=32, log_every=0,
+                      eval_every=0)
+    model, _ = fit(X, p, c, s, n, config=cfg)
+
+    k = min(200, len(X))
+    rng = np.random.default_rng(1)
+    fake = np.stack([X[rng.permutation(k), j] for j in range(X.shape[1])], 1)
+    Xb = torch.from_numpy(np.vstack([X[:k], fake]).astype(np.float32))
+    cat = lambda a: np.concatenate([a[:k], a[:k]])
+    pb, cb, sb = cat(p), cat(c), cat(s)
+    flag = np.r_[np.ones(k, bool), np.zeros(k, bool)]
+
+    def _eval(rows, is_real):
+        sampler = StratifiedNegativeSampler(
+            perturbation_idx=pb[rows], context_idx=cb[rows], stratum=sb[rows],
+            n_perturbations=int(p.max()) + 1, n_contexts=int(c.max()) + 1,
+        )
+        return evaluate(model, Xb, pb, cb, rows, sampler,
+                        np.random.default_rng(0), is_real=is_real)
+
+    real_only = _eval(np.arange(k), None)
+    mixed = _eval(np.arange(2 * k), flag)
+    for key in ("n_rows", "accuracy", "disc", "recon", "real_score_mean",
+                "fake_score_mean", "span_residual_median"):
+        assert mixed[key] == pytest.approx(real_only[key]), key
+    assert mixed["n_synthetic"] == k
+    assert 0.0 <= mixed["synth_accuracy"] <= 1.0
+    assert np.isfinite(mixed["disc_synth"])
 
 
 # ------------------------------------------------------- three-way split
@@ -534,23 +599,47 @@ def test_split_rejects_impossible_fractions():
 
 
 def test_early_stopping_restores_the_best_epoch():
-    """The last epoch is not the model we want; the selected one is."""
+    """The last epoch is not the model we want; the selected one is. Checked
+    for BOTH selection rules -- "accuracy" maximises, "total" (eq. 12, the
+    quantity actually minimised) minimises and therefore stops at the
+    overfitting onset. The two can pick different epochs."""
     from module_finder.data.augment import make_split
 
     meta = _toy_meta(n_pert=16, n_ctx=4, n_strata=3)
     X, p, c, s, n = _toy_dataset(n_pert=16, n_ctx=4, n_strata=3, n_genes=40)
     split = make_split(meta, level="pair", test_frac=0.12, val_frac=0.12, seed=0)
 
-    cfg = TrainConfig(n_factors=4, epochs=30, batch_size=32, log_every=0,
-                      eval_every=1, patience=2, seed=0)
-    model, history = fit(X, p, c, s, n, config=cfg,
-                         train_rows=split.train, val_rows=split.val)
+    for metric, pick in (("accuracy", max), ("total", min)):
+        cfg = TrainConfig(n_factors=4, epochs=30, batch_size=32, log_every=0,
+                          eval_every=1, patience=2, seed=0, select_on=metric)
+        model, history = fit(X, p, c, s, n, config=cfg,
+                             train_rows=split.train, val_rows=split.val)
+        key = f"val_{metric}"
+        evaluated = [h for h in history if key in h]
+        best = pick(evaluated, key=lambda h: h[key])
+        assert history[-1]["selected_epoch"] == best["epoch"], metric
+        assert len(history) <= 30
 
-    evaluated = [h for h in history if "val_accuracy" in h]
-    best = max(evaluated, key=lambda h: h["val_accuracy"])
-    assert history[-1]["selected_epoch"] == best["epoch"]
-    # patience must actually have been able to fire
-    assert len(history) <= 30
+
+def test_total_is_the_objective_on_both_train_and_val():
+    """`total` must equal disc + alpha*recon on both sides, so the two curves
+    are the same quantity and their crossing is meaningful."""
+    from module_finder.data.augment import make_split
+
+    meta = _toy_meta(n_pert=16, n_ctx=4, n_strata=3)
+    X, p, c, s, n = _toy_dataset(n_pert=16, n_ctx=4, n_strata=3, n_genes=40)
+    split = make_split(meta, level="pair", test_frac=0.12, val_frac=0.12, seed=0)
+    alpha = 700.0
+    cfg = TrainConfig(n_factors=4, alpha=alpha, epochs=6, batch_size=32,
+                      log_every=0, eval_every=1, patience=0, seed=0)
+    _, history = fit(X, p, c, s, n, config=cfg,
+                     train_rows=split.train, val_rows=split.val)
+    for h in history:
+        assert abs(h["total"] - (h["disc"] + alpha * h["recon"])) < 1e-6
+        if "val_total" in h:
+            assert abs(h["val_total"]
+                       - (h["val_disc"] + alpha * h["val_recon"])) < 1e-6
+
 
 
 def test_fit_rejects_overlapping_train_and_val():
@@ -561,3 +650,326 @@ def test_fit_rejects_overlapping_train_and_val():
         fit(X, p, c, s, n, config=TrainConfig(epochs=1, batch_size=32,
                                               log_every=0),
             train_rows=mask, val_rows=mask)
+
+
+# --- is_real gate and masked span residual ---------------------------------
+
+
+def test_span_residual_excludes_the_masked_entry():
+    """B is trained never to reconstruct the on-target entry, so charging the
+    residual for it inflates r. Masked and unmasked must differ, and masking
+    must match an explicit computation that drops the column."""
+    torch.manual_seed(0)
+    L = GlobalLoadings(3, 12, ridge=1e-4)
+    x = torch.randn(5, 12)
+    col = torch.full((5,), NO_MASK, dtype=torch.long)
+    col[:3] = torch.tensor([0, 4, 9])
+
+    r_masked = L.span_residual(x, col)
+    r_plain = L.span_residual(x)
+    assert not torch.allclose(r_masked[:3], r_plain[:3])
+    assert torch.allclose(r_masked[3:], r_plain[3:])       # unmasked rows unchanged
+
+    z = L.project(x, col)
+    resid = (x - L.reconstruct(z)).detach()
+    xm = x.clone()
+    for i in range(3):
+        resid[i, col[i]] = 0.0
+        xm[i, col[i]] = 0.0
+    expect = torch.linalg.norm(resid, dim=1) / torch.linalg.norm(xm, dim=1)
+    assert torch.allclose(r_masked, expect, atol=1e-6)
+
+
+def test_is_real_false_rows_are_excluded_from_reconstruction():
+    """Rows flagged not-real must not shape B. Appending pure noise marked
+    is_real=False must leave B where it would have been without those rows."""
+    rng = np.random.default_rng(0)
+    n, G = 400, 24
+    X = rng.normal(size=(n, G)).astype(np.float32)
+    p = rng.integers(0, 8, n)
+    c = rng.integers(0, 3, n)
+    s = rng.integers(0, 4, n)
+    cells = rng.integers(50, 500, n).astype(float)
+    cfg = TrainConfig(n_factors=3, epochs=2, batch_size=64, seed=0,
+                      log_every=0, eval_every=0, patience=0)
+
+    m_ref, _ = fit(X, p, c, s, cells, config=cfg)
+
+    fake = (rng.normal(size=(n, G)) * 50).astype(np.float32)   # wildly off-scale
+    X2 = np.vstack([X, fake])
+    pad = lambda a: np.concatenate([a, a])
+    real_flag = np.concatenate([np.ones(n, bool), np.zeros(n, bool)])
+    m_gated, _ = fit(X2, pad(p), pad(c), pad(s), pad(cells),
+                     config=cfg, is_real=real_flag)
+
+    # Not bit-identical (batching differs), but the gate must keep B finite and
+    # on-scale rather than dragged toward the 50x noise.
+    B_ref, B_gated = m_ref.loading_matrix(), m_gated.loading_matrix()
+    assert np.isfinite(B_gated).all()
+    assert B_gated.std() < 10 * B_ref.std()
+
+
+def test_is_real_rejects_bad_input():
+    rng = np.random.default_rng(0)
+    n, G = 300, 16
+    X = rng.normal(size=(n, G)).astype(np.float32)
+    a = (rng.integers(0, 6, n), rng.integers(0, 3, n),
+         rng.integers(0, 4, n), rng.integers(50, 300, n).astype(float))
+    cfg = TrainConfig(n_factors=2, epochs=1, batch_size=64, log_every=0,
+                      eval_every=0, patience=0)
+    with pytest.raises(ValueError, match="is_real has"):
+        fit(X, *a, config=cfg, is_real=np.ones(n - 1, bool))
+    with pytest.raises(ValueError, match="no real rows"):
+        fit(X, *a, config=cfg, is_real=np.zeros(n, bool))
+
+
+def test_negatives_never_name_a_held_out_pair():
+    """The sampler is built on training rows only, and every strategy must draw
+    from an OBSERVED (perturbation, context) pair, so a held-out pair is never
+    named as a negative."""
+    rng = np.random.default_rng(0)
+    n_p, n_c, n_s = 40, 6, 3
+    rows = [(p, c, s) for p in range(n_p) for c in range(n_c) for s in range(n_s)]
+    # hold out a tenth of the (p, c) pairs
+    pairs = sorted({(p, c) for p, c, _ in rows})
+    held = set(map(tuple, rng.permutation(pairs)[: len(pairs) // 10].tolist()))
+
+    tr = [(p, c, s) for p, c, s in rows if (p, c) not in held]
+    P = np.array([r[0] for r in tr]); C = np.array([r[1] for r in tr])
+    S = np.array([r[2] for r in tr])
+
+    sampler = StratifiedNegativeSampler(
+        perturbation_idx=P, context_idx=C, stratum=S,
+        n_perturbations=n_p, n_contexts=n_c, weights=dict(DEFAULT_WEIGHTS),
+    )
+    neg_p, neg_c = sampler.sample(np.arange(len(tr)), np.random.default_rng(1))
+
+    named_held = [(int(a), int(b)) for a, b in zip(neg_p, neg_c) if (int(a), int(b)) in held]
+    assert not named_held, f"{len(named_held)} negatives named a held-out pair, e.g. {named_held[:3]}"
+    observed = {(p, c) for p, c, _ in tr}
+    unseen = [(int(a), int(b)) for a, b in zip(neg_p, neg_c) if (int(a), int(b)) not in observed]
+    assert not unseen, f"{len(unseen)} negatives named an unobserved pair, e.g. {unseen[:3]}"
+    assert not ((neg_p == P) & (neg_c == C)).any(), "a negative kept its own label"
+
+
+
+def test_synthetic_rows_are_negatives_for_L_disc_and_signed_in_L_recon():
+    """Synthetic rows go through the SAME head as negatives -- the question is
+    "did p in c produce this?", and a shuffled vector answers no. They must not
+    enter L_recon with a plus sign; recon_fake_weight decides whether they are
+    dropped (0) or actively pushed away (>0)."""
+    rng = np.random.default_rng(0)
+    n, G = 256, 20
+    X = rng.normal(size=(n, G)).astype(np.float32)
+    fake = (rng.normal(size=(n, G)) * 100).astype(np.float32)     # off-scale
+    p = rng.integers(0, 6, n); c = rng.integers(0, 3, n)
+    st = rng.integers(0, 3, n); cells = rng.integers(50, 400, n).astype(float)
+    dbl = lambda a: np.concatenate([a, a])
+    flag = np.concatenate([np.ones(n, bool), np.zeros(n, bool)])
+    Xb = np.vstack([X, fake])
+
+    for beta in (0.0, 0.5):
+        cfg = TrainConfig(n_factors=3, epochs=2, batch_size=128, seed=0,
+                          log_every=0, eval_every=0, patience=0,
+                          recon_fake_weight=beta)
+        m, hist = fit(Xb, dbl(p), dbl(c), dbl(st), dbl(cells),
+                      config=cfg, is_real=flag)
+        B = m.loading_matrix()
+        assert np.isfinite(B).all(), f"beta={beta}: non-finite B"
+        assert hist[-1]["accuracy"] > 0.4, (beta, hist[-1]["accuracy"])
+        assert B.std() < 5.0, (beta, B.std())   # not dragged onto the 100x noise
+
+
+def test_recon_fake_weight_changes_the_objective():
+    """beta > 0 must actually alter the fit, else the minus term is inert."""
+    rng = np.random.default_rng(1)
+    n, G = 192, 16
+    X = rng.normal(size=(n, G)).astype(np.float32)
+    fake = rng.normal(size=(n, G)).astype(np.float32)
+    a = [rng.integers(0, 5, n), rng.integers(0, 3, n),
+         rng.integers(0, 3, n), rng.integers(50, 300, n).astype(float)]
+    dbl = lambda v: np.concatenate([v, v])
+    flag = np.concatenate([np.ones(n, bool), np.zeros(n, bool)])
+    out = {}
+    for beta in (0.0, 1.0):
+        cfg = TrainConfig(n_factors=3, epochs=3, batch_size=128, seed=0,
+                          log_every=0, eval_every=0, patience=0,
+                          recon_fake_weight=beta)
+        m, _ = fit(np.vstack([X, fake]), *[dbl(v) for v in a],
+                   config=cfg, is_real=flag)
+        out[beta] = m.loading_matrix()
+    assert not np.allclose(out[0.0], out[1.0]), "recon_fake_weight had no effect"
+
+
+def test_apply_split_keeps_synthetic_rows_with_their_real_twin():
+    """A synthetic row inherits a real pair's label, so it must land in the
+    SAME half. Re-drawing the split over the combined frame would scatter the
+    twins and leak a held-out pair's synthetic copy into training."""
+    from module_finder.data.augment import apply_split, make_split
+
+    rng = np.random.default_rng(0)
+    perts = [f"P{i:03d}" for i in range(60)]
+    ctxs = [f"C{i}" for i in range(4)]
+    rows = [{"perturbation": p, "context": c, "label": f"{p}__sub{s:02d}" if s else p,
+             "n_cells": 100 + s}
+            for p in perts for c in ctxs for s in range(3)]
+    real = pd.DataFrame(rows)
+    split = make_split(real, level="pair", test_frac=0.2, val_frac=0.1, seed=0)
+
+    fake = real.copy()                       # one synthetic twin per real row
+    combined = pd.concat([real, fake], ignore_index=True)
+    ext = apply_split(split, combined)
+
+    n = len(real)
+    # every synthetic row is in the same half as its twin
+    assert (ext.train[:n] == ext.train[n:]).all()
+    assert (ext.test[:n] == ext.test[n:]).all()
+    assert (ext.val[:n] == ext.val[n:]).all()
+    # and the halves still partition the combined frame
+    assert int(ext.train.sum() + ext.test.sum() + ext.val.sum()) == len(combined)
+    # no held-out pair appears in train, on either side
+    key = combined.perturbation + "|" + combined.context
+    assert not (set(key[ext.train]) & set(key[ext.test]))
+    assert not (set(key[ext.train]) & set(key[ext.val]))
+
+
+
+def test_balance_negatives_matches_negative_count_to_positives():
+    """|permuted| + |synthetic| must equal |positives|. With an equal number of
+    synthetic rows that means every permuted negative is dropped; with half as
+    many, half are kept."""
+    from module_finder.train import ModuleFinder
+    rng = np.random.default_rng(0)
+    n, G = 256, 16
+    X = rng.normal(size=(n, G)).astype(np.float32)
+    a = [rng.integers(0, 5, n), rng.integers(0, 3, n),
+         rng.integers(0, 3, n), rng.integers(50, 300, n).astype(float)]
+
+    seen = {}
+    orig = ModuleFinder.score
+    def spy(self, z, p_i, c_i):
+        seen["n"] = seen.get("n", 0) + len(z)
+        return orig(self, z, p_i, c_i)
+
+    for n_synth, expect_frac in ((n, 0.0), (n // 2, 0.5)):
+        Xf = rng.normal(size=(n_synth, G)).astype(np.float32)
+        cat = lambda v: np.concatenate([v, v[:n_synth]])
+        flag = np.concatenate([np.ones(n, bool), np.zeros(n_synth, bool)])
+        cfg = TrainConfig(n_factors=3, epochs=1, batch_size=n + n_synth,
+                          seed=0, log_every=0, eval_every=0, patience=0)
+        seen.clear()
+        ModuleFinder.score = spy
+        try:
+            fit(np.vstack([X, Xf]), *[cat(v) for v in a], config=cfg, is_real=flag)
+        finally:
+            ModuleFinder.score = orig
+        # scored = positives(n) + permuted(~expect_frac*n) + synthetic(n_synth)
+        expected = n + expect_frac * n + n_synth
+        assert abs(seen["n"] - expected) < 0.25 * n, (n_synth, seen["n"], expected)
+
+
+def test_balance_negatives_is_inert_without_synthetic_rows():
+    rng = np.random.default_rng(3)
+    n, G = 256, 16
+    X = rng.normal(size=(n, G)).astype(np.float32)
+    a = [rng.integers(0, 6, n), rng.integers(0, 3, n),
+         rng.integers(0, 3, n), rng.integers(50, 300, n).astype(float)]
+    Bs = []
+    for bal in (True, False):
+        cfg = TrainConfig(n_factors=3, epochs=2, batch_size=128, seed=0,
+                          log_every=0, eval_every=0, patience=0,
+                          balance_negatives=bal)
+        m, _ = fit(X, *a, config=cfg)
+        Bs.append(m.loading_matrix())
+    assert np.allclose(Bs[0], Bs[1])
+
+
+def test_single_context_perturbations_always_train():
+    """A perturbation with one pair has nothing left to train e_p on if that
+    pair is held out, so its row is unpredictable by construction. Those pairs
+    must stay in train."""
+    from module_finder.data.augment import make_split
+
+    rows = []
+    for i in range(200):                       # 12 contexts each
+        for c in range(12):
+            rows.append({"perturbation": f"P{i:03d}", "context": f"C{c}",
+                         "label": f"P{i:03d}"})
+    for i in range(20):                        # single-context perturbations
+        rows.append({"perturbation": f"S{i:02d}", "context": "C0",
+                     "label": f"S{i:02d}"})
+    meta = pd.DataFrame(rows)
+    singles = {f"S{i:02d}" for i in range(20)}
+
+    sp = make_split(meta, level="pair", test_frac=0.2, val_frac=0.2, seed=0)
+    held = set(meta[sp.test].perturbation) | set(meta[sp.val].perturbation)
+    assert not (singles & held), sorted(singles & held)[:3]
+    # every perturbation keeps at least one training pair
+    assert set(meta.perturbation) <= set(meta[sp.train].perturbation)
+    # and the held-out count is still the requested fraction of ALL pairs
+    n_pairs = meta.groupby(["perturbation", "context"], observed=True).ngroups
+    assert abs(len(sp.held_out) - round(0.2 * n_pairs)) <= 1
+
+    off = make_split(meta, level="pair", test_frac=0.2, val_frac=0.2, seed=0,
+                     protect_single_context=False)
+    held_off = set(meta[off.test].perturbation) | set(meta[off.val].perturbation)
+    assert singles & held_off, "opt-out should let singles be held out"
+
+
+def test_evaluate_takes_its_device_from_the_model_not_the_data():
+    """A caller may deliberately keep the full matrix on the CPU (it is ~11 GB
+    on the real split) and let batches move. Reading the device off X_t instead
+    of the model sends CPU batches into a CUDA model and the first matmul
+    raises. Checked on CPU by putting the model on a meta-free device and
+    asserting evaluate() uses `next(model.parameters()).device`."""
+    import inspect
+    from module_finder import train as T
+    src_ = inspect.getsource(T.evaluate)
+    assert "next(model.parameters()).device" in src_, \
+        "evaluate() must take its device from the model"
+    assert "device = X_t.device" not in src_, \
+        "evaluate() must not take its device from the data tensor"
+    # every batch slice of the data tensor is moved explicitly
+    for frag in ("X_t[idx_t].to(device)", "target_col[idx_t].to(device)"):
+        assert frag in src_, f"missing device move: {frag}"
+
+
+def test_min_epochs_keeps_training_but_still_restores_the_best_epoch():
+    """min_epochs decides when training STOPS, not which state is kept: a run
+    whose validation bottoms out early must still train to min_epochs, and
+    still restore the early best epoch."""
+    from module_finder.data.augment import make_split
+
+    meta = _toy_meta(n_pert=16, n_ctx=4, n_strata=3)
+    X, p, c, s, n = _toy_dataset(n_pert=16, n_ctx=4, n_strata=3, n_genes=40)
+    split = make_split(meta, level="pair", test_frac=0.12, val_frac=0.12, seed=0)
+    cfg = TrainConfig(n_factors=4, epochs=40, batch_size=32, log_every=0,
+                      eval_every=1, patience=1, min_epochs=25, seed=0)
+    _, history = fit(X, p, c, s, n, config=cfg,
+                     train_rows=split.train, val_rows=split.val)
+    assert len(history) >= 25, len(history)
+    ev = [h for h in history if "val_total" in h]
+    best = min(ev, key=lambda h: h["val_total"])
+    assert history[-1]["selected_epoch"] == best["epoch"]
+
+
+def test_on_eval_snapshots_B_at_every_evaluation():
+    """on_eval fires once per validation pass with the live model, so a copy
+    of B taken there is the B of that epoch -- not the restored one."""
+    from module_finder.data.augment import make_split
+
+    meta = _toy_meta(n_pert=16, n_ctx=4, n_strata=3)
+    X, p, c, s, n = _toy_dataset(n_pert=16, n_ctx=4, n_strata=3, n_genes=40)
+    split = make_split(meta, level="pair", test_frac=0.12, val_frac=0.12, seed=0)
+    cfg = TrainConfig(n_factors=4, epochs=10, batch_size=32, log_every=0,
+                      eval_every=3, patience=0, select_on="accuracy", seed=0)
+    snaps = {}
+    model, history = fit(X, p, c, s, n, config=cfg,
+                         train_rows=split.train, val_rows=split.val,
+                         on_eval=lambda ep, m: snaps.__setitem__(
+                             ep, m.loading_matrix().copy()))
+    evals = [h["epoch"] for h in history if "val_accuracy" in h]
+    assert sorted(snaps) == evals == [0, 3, 6, 9]
+    assert not np.allclose(snaps[0], snaps[9])
+    sel = history[-1]["selected_epoch"]
+    np.testing.assert_allclose(model.loading_matrix(), snaps[sel])

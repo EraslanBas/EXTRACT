@@ -27,7 +27,6 @@ import numpy as np
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from module_finder import paths
-from module_finder.data.rowbound import standardize_genes
 from module_finder.de import load_matrices
 from module_finder.evaluation.span import _pca_basis, span_residual
 
@@ -49,7 +48,7 @@ def main() -> None:
     d = B.shape[0]
 
     X, meta = load_matrices(args.matrices)
-    Xs, _ = standardize_genes(X.to_numpy())
+    Xs = X.to_numpy()            # used as-is: no per-gene centring or scaling
     del X
 
     test_idx = np.nonzero(test_mask)[0]

@@ -9,11 +9,13 @@ it.
 
 from __future__ import annotations
 
-import warnings
-from dataclasses import dataclass, field
+from typing import Callable
+
+from dataclasses import dataclass
 
 import numpy as np
 import torch
+import torch.nn.functional as F
 from torch import nn
 
 from .data.ontarget import on_target_index
@@ -58,6 +60,24 @@ class TrainConfig:
     #: Precision weighting of the reconstruction term: "linear" is w ~ n_cells.
     weight_scheme: str = "linear"
 
+    #: Thin the label-permuted negatives so that
+    #: ``|permuted| + |synthetic| == |positives|``, i.e. one negative per
+    #: positive overall. Without it every real row emits a permuted negative
+    #: AND every synthetic row is a negative, so negatives outnumber positives.
+    #: Mean-reduced BCE already equalises the two *terms*, but balancing the
+    #: counts also makes the synthetic share of the negatives equal the
+    #: fraction of synthetic rows loaded -- so the mixture is set by
+    #: ``--shuffled-frac`` and needs no separate weight. No effect without
+    #: synthetic rows.
+    balance_negatives: bool = True
+
+    #: Weight on the reconstruction error of SYNTHETIC rows (``is_real=False``),
+    #: entered with a MINUS sign. ``0.0`` drops them from ``L_recon`` entirely;
+    #: ``> 0`` actively pushes ``B`` away from spanning them, which is
+    #: contrastive PCA against a marginal-matched background. Either way ``B``
+    #: is fitted only to genuinely observed perturbation responses.
+    recon_fake_weight: float = 0.0
+
     #: Off by default. Independence is not identifiability -- see
     #: objectives.total_correlation.
     tc_weight: float = 0.0
@@ -92,14 +112,23 @@ class TrainConfig:
     #: no longer held out.
     patience: int = 4
 
-    #: Validation metric to select on. "accuracy" maximises; "disc" and
-    #: "recon" minimise.
-    select_on: str = "accuracy"
+    #: Never stop before this many epochs, however early validation bottomed
+    #: out. Early stopping still RESTORES the best epoch -- this only decides
+    #: when training stops, not which state is kept. Keeping it running past
+    #: the onset records the full shape of the train and val curves, which is
+    #: the evidence that the onset is an onset rather than noise.
+    min_epochs: int = 0
+
+    #: Validation metric to select on. "accuracy" maximises; "total", "disc"
+    #: and "recon" minimise. "total" is eq. (12) itself, so selecting on it
+    #: stops at the overfitting onset -- the epoch where validation turns up
+    #: while training keeps falling. "accuracy" and "total" can disagree
+    #: sharply: BCE worsens as the head grows confident even while the ranking
+    #: it induces still improves.
+    select_on: str = "total"
 
     negative_weights: dict[str, float] | None = None
-    vehicle_context_idx: tuple[int, ...] = ()
     log_every: int = 10
-    _: bool = field(default=False, repr=False)
 
 
 class ModuleFinder(nn.Module):
@@ -186,26 +215,54 @@ def fit(
     config: TrainConfig | None = None,
     train_rows: np.ndarray | None = None,
     val_rows: np.ndarray | None = None,
+    is_real: np.ndarray | None = None,
+    on_eval: Callable[[int, ModuleFinder], None] | None = None,
 ) -> tuple[ModuleFinder, list[dict]]:
     """Fit the model. Returns ``(model, history)``.
 
     Parameters
     ----------
     X
-        [n_rows, n_genes] shrunken logFC, **already gene-standardised**
-        (:func:`module_finder.data.rowbound.standardize_genes`). Per-gene SD
-        spans ~5.4e4x on these matrices; without standardising, the leading
-        factors are a handful of high-variance genes.
+        [n_rows, n_genes] shrunken logFC, used **as it is**. Do not centre or
+        scale the gene axis: ``ashr`` has already placed every entry on a
+        common log-fold-change scale, and dividing by per-gene SD would remove
+        exactly that and promote low-variance genes to equal footing.
     stratum
         [n_rows] subsample index ``s`` in ``0..10`` (0 = the full-data row).
         Required: the negative sampler stratifies on it, and without that the
         discriminator wins on noise scale.
     n_cells
         [n_rows] cells behind each estimate. Drives the precision weight.
-    target_col
-        [n_rows] on-target column per row from
-        :func:`module_finder.data.ontarget.on_target_index`, or ``None`` to
-        mask nothing (which lets knockdown efficiency claim a factor).
+    is_real
+        [n_rows] bool: is this row an actual *measured* response vector?
+        Defaults to all-True.
+    on_eval
+        Called as ``on_eval(epoch, model)`` after every validation pass, before
+        the best state is restored. Used to snapshot ``B`` at each evaluation
+        so the epoch can be re-chosen afterwards under a different rule.
+
+        A training row carries two independent bits: whether ``x`` was
+        measured (``is_real``), and whether the label attached to it is its
+        own.
+
+        ``L_disc`` uses **every** row, through one head asking one question:
+        "is this response the result of this perturbation in this context?"
+        Measured rows with their own label are the positives. Both a measured
+        row under a permuted label and a synthetic row under its **assigned**
+        ``(p, c)`` are negatives. The synthetic row keeps the label it was
+        generated for, so the head cannot reject it on a label mismatch -- it
+        has to decide whether the vector is a plausible response for that
+        label, which is the harder and more informative negative.
+
+        ``L_recon`` is where the bits differ. Measured rows enter with a plus
+        sign whatever label they carry: a label-permuted negative is still a
+        real response vector, so ``B`` should reconstruct it. Synthetic rows
+        enter with a **minus** sign scaled by ``TrainConfig.recon_fake_weight``
+        (``0`` drops them entirely), so ``B`` is fitted only to genuinely
+        observed perturbation responses. Minimising a synthetic row's
+        reconstruction error would instead train ``B`` to span a
+        product-of-marginals cloud whose covariance is diagonal by
+        construction.
     train_rows, val_rows
         Boolean masks over rows, from
         :func:`module_finder.data.augment.make_split` at ``level="pair"``. All
@@ -271,16 +328,7 @@ def fit(
     ).to(device)
 
     weights = dict(config.negative_weights or DEFAULT_WEIGHTS)
-    if not config.vehicle_context_idx and weights.pop("against_vehicle", 0):
-        # No vehicle context was identified, so that strategy has nothing to
-        # draw. Renormalise over the remaining two rather than failing: the
-        # against-vehicle negatives sharpen drug-specific modulation, they are
-        # not required for the discrimination to work.
-        warnings.warn(
-            "no vehicle_context_idx given; dropping the 'against_vehicle' "
-            "negatives and renormalising over the remaining strategies",
-            stacklevel=2,
-        )
+
     def _sampler(rows: np.ndarray) -> StratifiedNegativeSampler:
         return StratifiedNegativeSampler(
             perturbation_idx=perturbation_idx[rows],
@@ -288,7 +336,6 @@ def fit(
             stratum=stratum[rows],
             n_perturbations=n_perturbations,
             n_contexts=n_contexts,
-            vehicle_context_idx=tuple(config.vehicle_context_idx),
             weights=weights,
         )
 
@@ -299,9 +346,20 @@ def fit(
     eval_sampler = _sampler(val_idx) if val_idx is not None else None
 
     w = precision_weights(n_cells, scheme=config.weight_scheme)
+    if is_real is None:
+        is_real = np.ones(n_rows, dtype=bool)
+    else:
+        is_real = np.asarray(is_real, dtype=bool)
+        if len(is_real) != n_rows:
+            raise ValueError(
+                f"is_real has {len(is_real)} entries, X has {n_rows} rows"
+            )
+        if not is_real.any():
+            raise ValueError("no real rows: L_recon would have nothing to fit")
 
     X_t = torch.from_numpy(X).to(device)
     w_t = torch.from_numpy(w.astype(np.float32)).to(device)
+    real_t = torch.from_numpy(is_real).to(device)
     p_all = torch.from_numpy(perturbation_idx).to(device)
     c_all = torch.from_numpy(context_idx).to(device)
     if target_col is None or config.no_mask:
@@ -320,6 +378,19 @@ def fit(
         ).to(device)
         tc_opt = torch.optim.Adam(tc_disc.parameters(), lr=config.tc_lr)
 
+    # One negative per positive: |permuted| + |synthetic| == |positives|.
+    n_real_rows, n_synth_rows = int(is_real.sum()), int((~is_real).sum())
+    p_keep_perm = 1.0
+    if config.balance_negatives and n_synth_rows:
+        p_keep_perm = max(0.0, 1.0 - n_synth_rows / max(n_real_rows, 1))
+        print(
+            f"negative budget: {n_real_rows:,} positives | "
+            f"{n_synth_rows:,} synthetic + "
+            f"~{round(p_keep_perm * n_real_rows):,} permuted "
+            f"(keeping {p_keep_perm:.0%} of permuted draws)",
+            flush=True,
+        )
+
     history: list[dict] = []
     best = {"score": None, "epoch": -1, "state": None}
     since_best = 0
@@ -328,7 +399,8 @@ def fit(
     for epoch in range(config.epochs):
         model.train()
         order = rng.permutation(len(train_idx))
-        totals = {"disc": 0.0, "recon": 0.0, "tc": 0.0, "accuracy": 0.0}
+        totals = {"disc": 0.0, "recon": 0.0, "recon_measured": 0.0,
+                  "recon_synth": 0.0, "tc": 0.0, "accuracy": 0.0}
         n_batches = 0
 
         for start in range(0, len(train_idx), config.batch_size):
@@ -343,16 +415,92 @@ def fit(
             neg_p, neg_c = sampler.sample(local, rng)
 
             z = model.project(x, cols)                       # eq. (4)
-            real = model.score(z, p_all[rows_t], c_all[rows_t])
-            fake = model.score(
-                z,
-                torch.from_numpy(neg_p).to(device),
-                torch.from_numpy(neg_c).to(device),
+            neg_p_t = torch.from_numpy(neg_p).to(device)
+            neg_c_t = torch.from_numpy(neg_c).to(device)
+
+            keep = real_t[rows_t]                 # measured rows
+            synth = ~keep                         # column-shuffled rows
+            all_real = bool(keep.all())
+
+            # ---- L_disc, eq. (9) -------------------------------------
+            # One head, one question: "is this response the result of this
+            # perturbation in this context?" Three kinds of row answer it:
+            #   measured x  + its own label       -> yes  (positive)
+            #   measured x  + a permuted label    -> no   (negative)
+            #   synthetic x + its ASSIGNED label  -> no   (negative)
+            # The synthetic row keeps the (p, c) it was generated for -- the
+            # label is real and correct, only the vector is not. That makes it
+            # the harder negative of the two: the head cannot reject it on a
+            # label mismatch, it has to judge whether the vector is a plausible
+            # response for that label at all.
+            if all_real:
+                pos = model.score(z, p_all[rows_t], c_all[rows_t])
+                neg = model.score(z, neg_p_t, neg_c_t)
+            else:
+                pos_l, neg_l = [], []
+                if bool(keep.any()):
+                    pos_l.append(model.score(z[keep], p_all[rows_t][keep],
+                                             c_all[rows_t][keep]))
+                    # Thin the permuted negatives so the two kinds together
+                    # match the positives one for one. `p_keep_perm` is derived
+                    # from the GLOBAL counts, not this batch, so the ratio is
+                    # stable batch to batch.
+                    kidx = torch.nonzero(keep, as_tuple=True)[0]
+                    if p_keep_perm < 1.0:
+                        take = torch.from_numpy(
+                            rng.random(len(kidx)) < p_keep_perm).to(device)
+                        kidx = kidx[take]
+                    if len(kidx):
+                        neg_l.append(model.score(z[kidx], neg_p_t[kidx],
+                                                 neg_c_t[kidx]))
+                if bool(synth.any()):
+                    neg_l.append(model.score(z[synth], p_all[rows_t][synth],
+                                             c_all[rows_t][synth]))
+                pos = torch.cat(pos_l) if pos_l else torch.zeros(0, device=device)
+                neg = torch.cat(neg_l) if neg_l else torch.zeros(0, device=device)
+            real, fake = pos, neg
+
+            loss_d = (
+                contrastive_loss(pos, neg)
+                if len(pos) and len(neg)
+                else torch.zeros((), device=device)
             )
 
-            loss_d = contrastive_loss(real, fake)            # eq. (9)
-            per_row = model.loadings.squared_error(x, z, cols)
-            loss_r = weighted_squared_error(per_row, w_t[rows_t])  # eq. (10)
+            # ---- L_recon, eq. (10) -----------------------------------
+            # Measured rows enter with a plus sign, whatever label they carry.
+            # Synthetic rows enter with a MINUS sign scaled by
+            # `recon_fake_weight` (0 = not at all), so B is never fitted to a
+            # product-of-marginals cloud whose covariance is diagonal by
+            # construction.
+            def _sub_cols(m):
+                return cols[m] if cols is not None else None
+
+            if all_real:
+                per_row = model.loadings.squared_error(x, z, cols)
+                loss_r = weighted_squared_error(per_row, w_t[rows_t])
+            elif bool(keep.any()):
+                per_row = model.loadings.squared_error(
+                    x[keep], z[keep], _sub_cols(keep))
+                loss_r = weighted_squared_error(per_row, w_t[rows_t][keep])
+            else:
+                loss_r = torch.zeros((), device=device)
+
+            # Keep the two halves as well as the combined term. The combined
+            # value is what is minimised and is the right single number to
+            # compare against val -- but it is NOT comparable across beta: at
+            # beta=0 it IS the measured error, at beta>0 it is a difference, so
+            # a lower value cannot distinguish "fits the real data better" from
+            # "fits the fakes worse". The guard on beta needs the measured half.
+            loss_r_measured = loss_r
+            loss_r_synth = torch.zeros((), device=device)
+            if bool(synth.any()):
+                per_row_f = model.loadings.squared_error(
+                    x[synth], z[synth], _sub_cols(synth))
+                loss_r_synth = weighted_squared_error(
+                    per_row_f, w_t[rows_t][synth])
+                if config.recon_fake_weight:
+                    loss_r = loss_r - config.recon_fake_weight * loss_r_synth
+
             loss = loss_d + config.alpha * loss_r             # eq. (12)
 
             loss_tc = torch.zeros((), device=device)
@@ -377,6 +525,8 @@ def fit(
 
             totals["disc"] += float(loss_d)
             totals["recon"] += float(loss_r)
+            totals["recon_measured"] += float(loss_r_measured)
+            totals["recon_synth"] += float(loss_r_synth)
             totals["tc"] += float(loss_tc)
             totals["accuracy"] += discrimination_accuracy(real, fake)
             n_batches += 1
@@ -385,6 +535,10 @@ def fit(
             "epoch": epoch,
             **{k: v / max(n_batches, 1) for k, v in totals.items()},
         }
+        # the quantity actually minimised, eq. (12). Logged so the epoch where
+        # val turns up while train keeps falling -- the overfitting onset -- is
+        # readable from one column rather than reconstructed from two.
+        record["total"] = record["disc"] + config.alpha * record["recon"]
         is_last = epoch == config.epochs - 1
         evaluated = False
         if val_idx is not None and config.eval_every and (
@@ -404,9 +558,13 @@ def fit(
                         np.random.default_rng(config.seed + 10_000 + epoch),
                         col_t,
                         w_t,
+                        is_real=is_real,
+                        recon_fake_weight=config.recon_fake_weight,
                     ).items()
                 }
             )
+            record["val_total"] = (record["val_disc"]
+                                   + config.alpha * record["val_recon"])
             score = record[f"val_{config.select_on}"]
             improved = (
                 best["score"] is None
@@ -424,6 +582,8 @@ def fit(
             else:
                 since_best += 1
             record["val_best"] = improved
+            if on_eval is not None:
+                on_eval(epoch, model)
 
         history.append(record)
         if config.log_every and (epoch % config.log_every == 0 or is_last or evaluated):
@@ -436,11 +596,14 @@ def fit(
                     f"   | val acc {record['val_accuracy']:.3f}  "
                     f"recon {record['val_recon']:.4f}  "
                     f"r {record['val_span_residual_median']:.3f}"
-                    f"{'  *best' if record.get('val_best') else ''}"
+                    + (f"  synth acc {record['val_synth_accuracy']:.3f}"
+                       if record.get("val_n_synthetic") else "")
+                    + f"{'  *best' if record.get('val_best') else ''}"
                 )
             print(line, flush=True)
 
-        if config.patience and since_best >= config.patience:
+        if (config.patience and since_best >= config.patience
+                and epoch + 1 >= config.min_epochs):
             print(
                 f"early stop at epoch {epoch}: no val {config.select_on} "
                 f"improvement in {since_best} evaluations "
@@ -473,31 +636,51 @@ def evaluate(
     rng: np.random.Generator,
     target_col: torch.Tensor | None = None,
     row_weights: torch.Tensor | None = None,
+    is_real: np.ndarray | None = None,
+    recon_fake_weight: float = 0.0,
     batch_size: int = 2048,
 ) -> dict:
-    """Metrics on held-out rows.
+    """Metrics on held-out rows, scored exactly as training scores them.
+
+    ``is_real`` [n_rows of X] marks measured rows; ``None`` means all measured.
+    Measured rows under their own label are the positives. Measured rows under
+    a permuted label, and synthetic rows under their **own** label, are the
+    two kinds of negative. Synthetic rows are never positives and never enter
+    ``recon`` or the span residual.
 
     What each number is testing:
 
     ``accuracy`` / ``disc``
-        Can the model tell a held-out ``(p, c)`` pair from a permuted one? Both
-        ``p`` and ``c`` were seen in training but *never together*, so this is
-        the interaction test. **A lookup table scores at chance here** -- this
-        is the number that separates a model which found structure from one
-        that memorised the training pairs.
+        Measured rows under their own label vs a permuted one. Both ``p`` and
+        ``c`` were seen in training but *never together*, so this is the
+        interaction test. **A lookup table scores at chance here** -- this is
+        the number that separates a model which found structure from one that
+        memorised the training pairs. Synthetic rows do not enter it, so it is
+        comparable between runs with and without them.
+    ``synth_accuracy`` / ``disc_synth``
+        Measured rows vs synthetic rows, each under its own label: can the
+        model tell a real response from a marginal-matched fake one? Balanced,
+        i.e. the mean of positive and synthetic-negative accuracy. ``NaN``
+        when no synthetic rows are present.
     ``recon``
-        Precision-weighted masked squared error, comparable to the training
-        ``recon`` directly.
+        Precision-weighted masked squared error on measured rows, comparable
+        to the training ``recon`` directly.
     ``span_residual_median`` / ``_q90``
-        ``||x - x B^+ B|| / ||x||`` on held-out rows -- eq. (14). Large values
-        mean the held-out pairs need programs outside ``span(B)``, the one
-        failure mode the architecture cannot absorb.
-    ``real_score_mean`` / ``fake_score_mean``
+        ``||x - x B^+ B|| / ||x||`` on measured held-out rows -- eq. (14).
+        Large values mean the held-out pairs need programs outside
+        ``span(B)``, the one failure mode the architecture cannot absorb.
+    ``real_score_mean`` / ``fake_score_mean`` / ``synth_score_mean``
         The raw logits. A collapsed head shows up here as both near zero even
         when accuracy looks acceptable.
     """
+    was_training = model.training
     model.eval()
-    device = X_t.device
+    # Take the device from the MODEL, not from X_t. A caller may keep the full
+    # matrix on the CPU on purpose (it is ~11 GB here) and let batches move; if
+    # we read the device off X_t instead, a CUDA model gets CPU batches and the
+    # first matmul raises.
+    device = next(model.parameters()).device
+    src = X_t.device
     rows = np.asarray(rows, dtype=np.int64)
     if len(rows) and (rows.max() >= len(X_t) or rows.min() < 0):
         raise IndexError(
@@ -510,52 +693,110 @@ def evaluate(
             "rows, so the two must correspond one-to-one"
         )
 
-    n = 0
-    acc = disc = recon = real_sum = fake_sum = 0.0
+    real_rows = (
+        np.ones(len(rows), dtype=bool)
+        if is_real is None
+        else np.asarray(is_real, dtype=bool)[rows]
+    )
+    if not real_rows.any():
+        raise ValueError("no measured rows to evaluate")
+
+    def _bce_sum(logits: torch.Tensor, target: float) -> float:
+        return float(F.binary_cross_entropy_with_logits(
+            logits, torch.full_like(logits, target), reduction="sum"))
+
+    # Accumulated as sums and counts, so batches with few measured rows weigh
+    # exactly as much as their rows do.
+    t = dict.fromkeys(
+        ["pos_ok", "pos_bce", "pos_sum", "perm_ok", "perm_bce", "perm_sum",
+         "syn_ok", "syn_bce", "syn_sum", "wsq", "w",
+         "wsq_syn", "w_syn"], 0.0)
+    n_pos = n_syn = 0
     residuals = []
 
     for start in range(0, len(rows), batch_size):
         local = np.arange(start, min(start + batch_size, len(rows)))
-        if len(local) < 2:
-            continue
-        idx = rows[local]
-        idx_t = torch.from_numpy(idx).to(device)
-        x = X_t[idx_t]
-        cols = target_col[idx_t] if target_col is not None else None
+        keep = real_rows[local]
+        local_real, local_syn = local[keep], local[~keep]
 
-        neg_p, neg_c = sampler.sample(local, rng)
-        z = model.project(x, cols)
-        real = model.score(
-            z,
-            torch.from_numpy(perturbation_idx[idx]).to(device),
-            torch.from_numpy(context_idx[idx]).to(device),
-        )
-        fake = model.score(
-            z,
-            torch.from_numpy(neg_p).to(device),
-            torch.from_numpy(neg_c).to(device),
-        )
+        if len(local_real):
+            idx = rows[local_real]
+            idx_t = torch.from_numpy(idx).to(src)
+            x = X_t[idx_t].to(device)
+            cols = (target_col[idx_t].to(device)
+                    if target_col is not None else None)
+            z = model.project(x, cols)
+            pos = model.score(
+                z,
+                torch.from_numpy(perturbation_idx[idx]).to(device),
+                torch.from_numpy(context_idx[idx]).to(device),
+            )
+            neg_p, neg_c = sampler.sample(local_real, rng)
+            perm = model.score(
+                z,
+                torch.from_numpy(neg_p).to(device),
+                torch.from_numpy(neg_c).to(device),
+            )
+            t["pos_ok"] += float((pos > 0).sum())
+            t["pos_bce"] += _bce_sum(pos, 1.0)
+            t["pos_sum"] += float(pos.sum())
+            t["perm_ok"] += float((perm <= 0).sum())
+            t["perm_bce"] += _bce_sum(perm, 0.0)
+            t["perm_sum"] += float(perm.sum())
 
-        k = len(local)
-        acc += discrimination_accuracy(real, fake) * k
-        disc += float(contrastive_loss(real, fake)) * k
-        per_row = model.loadings.squared_error(x, z, cols)
-        w = row_weights[idx_t] if row_weights is not None else None
-        recon += float(weighted_squared_error(per_row, w)) * k
-        real_sum += float(real.sum())
-        fake_sum += float(fake.sum())
-        residuals.append(model.loadings.span_residual(x).cpu().numpy())
-        n += k
+            per_row = model.loadings.squared_error(x, z, cols)
+            w = (row_weights[idx_t].to(device) if row_weights is not None
+                 else torch.ones_like(per_row))
+            t["wsq"] += float((per_row * w).sum())
+            t["w"] += float(w.sum())
+            residuals.append(model.loadings.span_residual(x, cols).cpu().numpy())
+            n_pos += len(idx)
 
-    model.train()
-    r = np.concatenate(residuals) if residuals else np.array([np.nan])
+        if len(local_syn):
+            idx = rows[local_syn]
+            idx_t = torch.from_numpy(idx).to(src)
+            cols = (target_col[idx_t].to(device)
+                    if target_col is not None else None)
+            z = model.project(X_t[idx_t].to(device), cols)
+            syn = model.score(                     # its OWN label: a negative
+                z,
+                torch.from_numpy(perturbation_idx[idx]).to(device),
+                torch.from_numpy(context_idx[idx]).to(device),
+            )
+            t["syn_ok"] += float((syn <= 0).sum())
+            t["syn_bce"] += _bce_sum(syn, 0.0)
+            t["syn_sum"] += float(syn.sum())
+            per_row_s = model.loadings.squared_error(
+                X_t[idx_t].to(device), z, cols)
+            w_s = (row_weights[idx_t].to(device) if row_weights is not None
+                   else torch.ones_like(per_row_s))
+            t["wsq_syn"] += float((per_row_s * w_s).sum())
+            t["w_syn"] += float(w_s.sum())
+            n_syn += len(idx)
+
+    model.train(was_training)
+    r = np.concatenate(residuals)
+    nan = float("nan")
     return {
-        "n_rows": int(n),
-        "accuracy": acc / max(n, 1),
-        "disc": disc / max(n, 1),
-        "recon": recon / max(n, 1),
-        "real_score_mean": real_sum / max(n, 1),
-        "fake_score_mean": fake_sum / max(n, 1),
+        "n_rows": int(n_pos),
+        "n_synthetic": int(n_syn),
+        "accuracy": (t["pos_ok"] + t["perm_ok"]) / (2 * n_pos),
+        "disc": (t["pos_bce"] + t["perm_bce"]) / n_pos,
+        "synth_accuracy": (
+            0.5 * (t["pos_ok"] / n_pos + t["syn_ok"] / n_syn) if n_syn else nan
+        ),
+        "disc_synth": (
+            t["pos_bce"] / n_pos + t["syn_bce"] / n_syn if n_syn else nan
+        ),
+        "recon_measured": t["wsq"] / max(t["w"], 1e-12),
+        "recon_synth": (t["wsq_syn"] / t["w_syn"]) if t["w_syn"] else nan,
+        # the combined objective, the same quantity training minimises
+        "recon": (t["wsq"] / max(t["w"], 1e-12)
+                  - recon_fake_weight * (t["wsq_syn"] / t["w_syn"]
+                                         if t["w_syn"] else 0.0)),
+        "real_score_mean": t["pos_sum"] / n_pos,
+        "fake_score_mean": t["perm_sum"] / n_pos,
+        "synth_score_mean": t["syn_sum"] / n_syn if n_syn else nan,
         "span_residual_median": float(np.median(r)),
         "span_residual_q90": float(np.quantile(r, 0.90)),
     }
@@ -569,6 +810,8 @@ def prepare(
     meta,
     genes: np.ndarray,
     mask_on_target: bool = True,
+    perturbation_levels: np.ndarray | None = None,
+    context_levels: np.ndarray | None = None,
 ) -> dict:
     """Turn ``(X, meta)`` from :func:`module_finder.de.load_matrices` into
     :func:`fit` arguments.
@@ -576,6 +819,11 @@ def prepare(
     ``meta`` needs ``perturbation``, ``context``, ``label`` and ``n_cells``.
     The stratum is read off the ``__subNN`` suffix of ``label``: the full-data
     row has no suffix and becomes stratum 0.
+
+    Pass ``perturbation_levels`` / ``context_levels`` from a previous call to
+    encode a second row set (the test partition) with the **same** indices, so
+    its labels address the embeddings the model was trained with. A label
+    absent from the given levels is an error, not a new index.
     """
     import pandas as pd
 
@@ -583,8 +831,19 @@ def prepare(
     contexts = meta["context"].to_numpy()
     labels = meta["label"].astype(str).to_numpy()
 
-    pert_codes, pert_levels = pd.factorize(perturbations, sort=True)
-    ctx_codes, ctx_levels = pd.factorize(contexts, sort=True)
+    def _encode(values, levels, what):
+        if levels is None:
+            return pd.factorize(values, sort=True)
+        codes = pd.Categorical(values, categories=levels).codes
+        if (codes < 0).any():
+            unknown = sorted(set(values[codes < 0]))
+            raise ValueError(
+                f"{len(unknown)} {what} not in the given levels, e.g. {unknown[:3]}"
+            )
+        return codes, np.asarray(levels)
+
+    pert_codes, pert_levels = _encode(perturbations, perturbation_levels, "perturbations")
+    ctx_codes, ctx_levels = _encode(contexts, context_levels, "contexts")
 
     stratum = np.zeros(len(labels), dtype=np.int64)
     for i, lab in enumerate(labels):

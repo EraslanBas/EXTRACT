@@ -127,7 +127,13 @@ class GlobalLoadings(nn.Module):
         if unstable.any():
             idx = torch.nonzero(unstable, as_tuple=True)[0]
             bb = b[idx]                                 # [k, d]
-            G = torch.linalg.inv(Ginv).unsqueeze(0) - bb.unsqueeze(2) * bb.unsqueeze(1)
+            # Rebuild the Gram matrix directly rather than inverting Ginv: this
+            # is the path chosen precisely because the system is ill-conditioned,
+            # so inverting an inverse is the last thing to do here.
+            G_full = self.B @ self.B.T + self.ridge * torch.eye(
+                self.n_factors, device=self.B.device, dtype=self.B.dtype
+            )
+            G = G_full.unsqueeze(0) - bb.unsqueeze(2) * bb.unsqueeze(1)
             z = z.clone()
             z[idx] = torch.linalg.solve(G, Bx[idx].unsqueeze(-1)).squeeze(-1)
         return z
@@ -165,14 +171,32 @@ class GlobalLoadings(nn.Module):
     # ---- diagnostics ------------------------------------------------------
 
     @torch.no_grad()
-    def span_residual(self, x: torch.Tensor) -> torch.Tensor:
-        """``||x - x B^+ B|| / ||x||`` per row -- eq. (14).
+    def span_residual(
+        self, x: torch.Tensor, target_col: torch.Tensor | None = None
+    ) -> torch.Tensor:
+        """``||m * (x - x B^+ B)|| / ||m * x||`` per row -- eq. (14).
 
         The one measurement that can invalidate the architecture rather than
         call for a tuning pass: a held-out drug whose rows carry a large
         orthogonal residual introduced a program the training contexts never
         showed, and no amount of nonlinearity elsewhere can absorb it.
+
+        Pass ``target_col`` so the on-target entry is excluded from both the
+        projection and the norms, exactly as in training. ``B`` is fitted never
+        to reconstruct that entry, and it carries a median ~25% of a row's
+        squared norm, so leaving it in charges ``B`` for mass it was told to
+        ignore and inflates ``r``. Omitting ``target_col`` reproduces the
+        earlier unmasked behaviour.
         """
-        z = self.project(x)
-        resid = torch.linalg.norm(x - self.reconstruct(z), dim=1)
-        return resid / torch.linalg.norm(x, dim=1).clamp_min(1e-12)
+        z = self.project(x, target_col)
+        resid = x - self.reconstruct(z)
+        if target_col is not None:
+            masked = target_col != NO_MASK
+            if masked.any():
+                rows = torch.nonzero(masked, as_tuple=True)[0]
+                resid = resid.clone()
+                x = x.clone()
+                resid[rows, target_col[rows]] = 0.0
+                x[rows, target_col[rows]] = 0.0
+        num = torch.linalg.norm(resid, dim=1)
+        return num / torch.linalg.norm(x, dim=1).clamp_min(1e-12)

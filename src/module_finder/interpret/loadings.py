@@ -27,26 +27,18 @@ import numpy as np
 import pandas as pd
 
 
-def loadings_from_decoder(
-    B: np.ndarray,
-    genes: np.ndarray,
-    gene_scale: np.ndarray | None = None,
-) -> pd.DataFrame:
+def loadings_from_decoder(B: np.ndarray, genes: np.ndarray) -> pd.DataFrame:
     """Exact loadings from a global linear decoder.
+
+    Already in log-fold-change units: the model is fitted on unscaled shrunken
+    logFC, so ``B`` needs no back-transform.
 
     Parameters
     ----------
     B
         [n_factors, n_genes] decoder weight.
-    gene_scale
-        The per-gene SD returned by
-        :func:`~module_finder.data.rowbound.standardize_genes`. Supplying it
-        maps loadings back into log-fold-change units; omitting it leaves them
-        in standardised units.
     """
     B = np.asarray(B, dtype=np.float64)
-    if gene_scale is not None:
-        B = B * np.asarray(gene_scale)[None, :]
     return pd.DataFrame(
         B,
         index=[f"factor_{k}" for k in range(B.shape[0])],
@@ -58,7 +50,6 @@ def loadings_by_regression(
     Z: np.ndarray,
     X: np.ndarray,
     genes: np.ndarray,
-    gene_scale: np.ndarray | None = None,
 ) -> pd.DataFrame:
     """Haufe pattern: regress gene space on factor activations.
 
@@ -70,7 +61,7 @@ def loadings_by_regression(
     X = np.asarray(X, dtype=np.float64)
     design = np.c_[Z, np.ones(len(Z))]
     coef, *_ = np.linalg.lstsq(design, X, rcond=None)
-    return loadings_from_decoder(coef[: Z.shape[1]], genes, gene_scale)
+    return loadings_from_decoder(coef[: Z.shape[1]], genes)
 
 
 def anchor_signs(
@@ -113,7 +104,6 @@ def loadings_per_context(
     X: np.ndarray,
     contexts: np.ndarray,
     genes: np.ndarray,
-    gene_scale: np.ndarray | None = None,
 ) -> dict[str, pd.DataFrame]:
     """Per-context loadings, fitted independently within each context.
 
@@ -126,7 +116,7 @@ def loadings_per_context(
     out = {}
     for context in np.unique(contexts):
         m = contexts == context
-        out[str(context)] = loadings_by_regression(Z[m], X[m], genes, gene_scale)
+        out[str(context)] = loadings_by_regression(Z[m], X[m], genes)
     return out
 
 

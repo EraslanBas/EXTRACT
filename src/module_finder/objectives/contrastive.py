@@ -31,15 +31,15 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 
-#: The three strategies of the spec. Names match
+#: The two strategies of the spec. Names match
 #: :data:`module_finder.data.augment.STRATEGIES` so a sampled negative and a
-#: pre-built augmented table mean the same thing.
-STRATEGIES = ("same_s_other_pert", "same_s_other_context", "against_vehicle")
+#: pre-built augmented table mean the same thing. No strategy assumes a
+#: reference context (vehicle, untreated): contexts are symmetric.
+STRATEGIES = ("same_s_other_pert", "same_s_other_context")
 
 DEFAULT_WEIGHTS = {
-    "same_s_other_pert": 0.45,
-    "same_s_other_context": 0.40,
-    "against_vehicle": 0.15,
+    "same_s_other_pert": 0.5,
+    "same_s_other_context": 0.5,
 }
 
 
@@ -55,9 +55,6 @@ class StratifiedNegativeSampler:
     perturbation_idx, context_idx, stratum
         [n_rows] each. ``stratum`` is the subsample index ``s`` in ``0..10``
         (0 = the full-data row), i.e. the sample's precision tier.
-    vehicle_context_idx
-        Context indices that count as vehicle (DMSO). Required if
-        ``against_vehicle`` has nonzero weight.
     weights
         Mixture over :data:`STRATEGIES`.
 
@@ -67,10 +64,8 @@ class StratifiedNegativeSampler:
         ``A1BG__sub03 -> BRCA1__sub03``. Same context, same stratum, different
         perturbation. Forces perturbation identity.
     ``same_s_other_context``
-        ``A1BG__sub03`` under a different drug. Forces the drug interaction
-        ``delta_pc``.
-    ``against_vehicle``
-        Pair with a DMSO context label. Forces drug-specific modulation.
+        ``A1BG__sub03`` under a different context. Forces the interaction
+        ``delta_pc``. Unavailable with a single context; give it zero weight.
     """
 
     perturbation_idx: np.ndarray
@@ -78,7 +73,6 @@ class StratifiedNegativeSampler:
     stratum: np.ndarray
     n_perturbations: int
     n_contexts: int
-    vehicle_context_idx: tuple[int, ...] = ()
     weights: dict[str, float] = field(default_factory=lambda: dict(DEFAULT_WEIGHTS))
 
     def __post_init__(self) -> None:
@@ -88,11 +82,6 @@ class StratifiedNegativeSampler:
         total = sum(self.weights.values())
         if total <= 0:
             raise ValueError("strategy weights must sum to a positive number")
-        if self.weights.get("against_vehicle", 0) and not self.vehicle_context_idx:
-            raise ValueError(
-                "'against_vehicle' requires vehicle_context_idx (the indices of "
-                "the DMSO contexts)"
-            )
         self._names = list(self.weights)
         self._probs = np.array([self.weights[n] for n in self._names]) / total
 
@@ -110,7 +99,21 @@ class StratifiedNegativeSampler:
         for (p, s), grp in _groupby(self.perturbation_idx, self.stratum):
             self._by_ps[(p, s)] = np.unique(self.context_idx[grp])
 
-        self._vehicles = np.asarray(self.vehicle_context_idx, dtype=np.int64)
+        # Stratum-free fallbacks. Used only when a (cell, stratum) pool cannot
+        # supply an alternative; drawing from these keeps the emitted negative
+        # an *observed* (perturbation, context) pair, which is the invariant
+        # that makes held-out evaluation meaningful.
+        self._perts_by_c: dict[int, np.ndarray] = {}
+        for ctx in np.unique(self.context_idx):
+            self._perts_by_c[int(ctx)] = np.unique(
+                self.perturbation_idx[self.context_idx == ctx]
+            )
+        self._ctxs_by_p: dict[int, np.ndarray] = {}
+        for prt in np.unique(self.perturbation_idx):
+            self._ctxs_by_p[int(prt)] = np.unique(
+                self.context_idx[self.perturbation_idx == prt]
+            )
+
         self._n_strata = int(self.stratum.max()) + 1
         self._depth_cache = None
 
@@ -132,32 +135,47 @@ class StratifiedNegativeSampler:
         neg_c = c.copy()
         choice = rng.choice(len(self._names), size=len(rows), p=self._probs)
 
+        # Every emitted negative must name a (p, c) pair observed among the
+        # sampler's own rows -- the invariant that keeps held-out pairs from
+        # ever being named. When the chosen axis has no observed alternative
+        # (a perturbation with a single training context cannot swap its
+        # context), swap the other axis instead. Drawing from the full label
+        # range, as an earlier version did, named held-out and never-measured
+        # pairs: ~50 per epoch on the 16-context screen.
         for i, name in enumerate(self._names):
-            sel = np.nonzero(choice == i)[0]
-            if not len(sel):
-                continue
-            if name == "same_s_other_pert":
-                for j in sel:
-                    pool = self._by_cs.get((int(c[j]), int(s[j])))
-                    neg_p[j] = _draw_excluding(pool, int(p[j]), self.n_perturbations, rng)
-            elif name == "same_s_other_context":
-                for j in sel:
-                    pool = self._by_ps.get((int(p[j]), int(s[j])))
-                    neg_c[j] = _draw_excluding(pool, int(c[j]), self.n_contexts, rng)
-            elif name == "against_vehicle":
-                neg_c[sel] = self._vehicles[rng.integers(0, len(self._vehicles), len(sel))]
-
-        # A negative that coincides with its own label is a mislabelled training
-        # example. This bites 'against_vehicle' hardest: for a row already in a
-        # vehicle context the swap is a no-op. Repair by moving the perturbation
-        # away from its own value, which is always a true negative. Before the
-        # repair this affected 13/2000 draws in testing.
-        collided = (neg_p == p) & (neg_c == c)
-        if collided.any():
-            for j in np.nonzero(collided)[0]:
-                pool = self._by_cs.get((int(neg_c[j]), int(s[j])))
-                neg_p[j] = _draw_excluding(pool, int(p[j]), self.n_perturbations, rng)
+            for j in np.nonzero(choice == i)[0]:
+                pj, cj, sj = int(p[j]), int(c[j]), int(s[j])
+                swaps = (
+                    (self._swap_pert, self._swap_context)
+                    if name == "same_s_other_pert"
+                    else (self._swap_context, self._swap_pert)
+                )
+                for swap in swaps:
+                    drawn = swap(pj, cj, sj, rng)
+                    if drawn is not None:
+                        neg_p[j], neg_c[j] = drawn
+                        break
+                else:
+                    raise ValueError(
+                        f"label (perturbation {pj}, context {cj}) has no observed "
+                        "alternative on either axis; it cannot be given a "
+                        "negative without naming an unobserved pair"
+                    )
         return neg_p, neg_c
+
+    def _swap_pert(self, p: int, c: int, s: int, rng) -> tuple[int, int] | None:
+        """``(p', c)`` with ``p'`` observed in ``c``, same stratum preferred."""
+        drawn = _draw_excluding(
+            self._by_cs.get((c, s)), p, rng, fallback_pool=self._perts_by_c.get(c)
+        )
+        return None if drawn is None else (drawn, c)
+
+    def _swap_context(self, p: int, c: int, s: int, rng) -> tuple[int, int] | None:
+        """``(p, c')`` with ``p`` observed in ``c'``, same stratum preferred."""
+        drawn = _draw_excluding(
+            self._by_ps.get((p, s)), c, rng, fallback_pool=self._ctxs_by_p.get(p)
+        )
+        return None if drawn is None else (p, drawn)
 
     def precision_mismatch(
         self,
@@ -228,21 +246,23 @@ def _groupby(a: np.ndarray, b: np.ndarray):
 
 
 def _draw_excluding(
-    pool: np.ndarray | None, own: int, n_values: int, rng: np.random.Generator
-) -> int:
-    """Draw from ``pool`` excluding ``own``; fall back to the full range.
+    pool: np.ndarray | None,
+    own: int,
+    rng: np.random.Generator,
+    fallback_pool: np.ndarray | None = None,
+) -> int | None:
+    """Draw from ``pool`` excluding ``own``, widening to ``fallback_pool``.
 
-    The fallback matters: a perturbation observed in only one context has no
-    same-stratum alternative, and refusing to emit a negative there would
-    silently drop those rows from the discrimination task.
+    ``fallback_pool`` is the same quantity without the stratum constraint, so
+    the widened draw is still an *observed* label. Returns ``None`` when
+    neither offers an alternative; the caller then swaps the other axis.
     """
-    if pool is not None and len(pool) > 1:
-        candidates = pool[pool != own]
-        if len(candidates):
-            return int(candidates[rng.integers(0, len(candidates))])
-    if n_values < 2:
-        raise ValueError("cannot resample a label with fewer than 2 values")
-    return int((own + rng.integers(1, n_values)) % n_values)
+    for candidates in (pool, fallback_pool):
+        if candidates is not None and len(candidates) > 1:
+            c = candidates[candidates != own]
+            if len(c):
+                return int(c[rng.integers(0, len(c))])
+    return None
 
 
 

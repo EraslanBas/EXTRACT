@@ -49,7 +49,6 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from module_finder import paths
 from module_finder.data.augment import make_split
-from module_finder.data.rowbound import standardize_genes
 from module_finder.de import load_matrices
 from module_finder.evaluation.stability import match_factors
 from module_finder.objectives import StratifiedNegativeSampler
@@ -92,8 +91,6 @@ def build_argparser() -> argparse.ArgumentParser:
     p.add_argument("--test-frac", type=float, default=0.1)
     p.add_argument("--val-frac", type=float, default=0.1)
     p.add_argument("--split-seed", type=int, default=0)
-    p.add_argument("--vehicle-contexts", nargs="+",
-                   default=["DMSO_round2", "DMSO_round2_batch2"])
     p.add_argument("--min-gene-sd", type=float, default=0.0,
                    help="drop genes whose raw logFC SD is at or below this "
                         "before standardising. 0 keeps every gene, which is "
@@ -121,8 +118,7 @@ def main() -> None:
         Xr = Xr[:, keep]
         genes = genes[keep]
 
-    Xs, _ = standardize_genes(Xr)
-    del Xr
+    Xs = Xr                      # used as-is: no per-gene centring or scaling
     fit_args = prepare(Xs, meta, genes)
     pert_levels = fit_args.pop("perturbation_levels")
     ctx_levels = fit_args.pop("context_levels")
@@ -132,9 +128,6 @@ def main() -> None:
                        val_frac=args.val_frac, seed=args.split_seed)
     print(f"split: {int(split.train.sum()):,} train / {int(split.val.sum()):,} val"
           f" / {int(split.test.sum()):,} test rows", flush=True)
-
-    vehicle_idx = tuple(int(i) for i, n in enumerate(ctx_levels)
-                        if n in set(args.vehicle_contexts))
 
     X_t = torch.from_numpy(fit_args["X"])
     col_t = (torch.from_numpy(fit_args["target_col"])
@@ -149,7 +142,6 @@ def main() -> None:
             stratum=fit_args["stratum"][rows],
             n_perturbations=int(fit_args["perturbation_idx"].max()) + 1,
             n_contexts=int(fit_args["context_idx"].max()) + 1,
-            vehicle_context_idx=vehicle_idx,
             weights={"same_s_other_pert": 0.5, "same_s_other_context": 0.5},
         )
         return evaluate(model, X_t, fit_args["perturbation_idx"],
@@ -168,7 +160,6 @@ def main() -> None:
                 n_factors=d, alpha=args.alpha, epochs=args.epochs,
                 batch_size=args.batch_size, seed=seed, log_every=0,
                 eval_every=args.eval_every, patience=args.patience,
-                vehicle_context_idx=vehicle_idx,
             )
             t = time.time()
             model, hist = fit(config=cfg, train_rows=split.train,
@@ -232,8 +223,7 @@ def main() -> None:
     # ---- the single test read, for the selected d only ---------------
     cfg = TrainConfig(n_factors=best_d, alpha=args.alpha, epochs=args.epochs,
                       batch_size=args.batch_size, seed=args.seeds[0], log_every=0,
-                      eval_every=args.eval_every, patience=args.patience,
-                      vehicle_context_idx=vehicle_idx)
+                      eval_every=args.eval_every, patience=args.patience)
     model, _ = fit(config=cfg, train_rows=split.train, val_rows=split.val, **fit_args)
     test_m = metrics_on(model, test_rows)
     print(f"\nTEST at d={best_d}: acc {test_m['accuracy']:.4f}  "
