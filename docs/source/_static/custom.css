@@ -1,0 +1,52 @@
+/* ModuleFinder documentation - theme overrides.
+   Small on purpose; the pydata theme handles light/dark, and every colour here
+   is defined for both schemes. */
+
+html[data-theme="light"] {
+    --mf-accent: #2a6f4e;
+    --mf-accent-soft: #e9f3ee;
+    --mf-border: #d7dde3;
+}
+
+html[data-theme="dark"] {
+    --mf-accent: #74c39b;
+    --mf-accent-soft: #15241d;
+    --mf-border: #2f3a42;
+}
+
+.bd-main .bd-content .sd-card {
+    border: 1px solid var(--mf-border);
+    transition: border-color 0.15s ease, transform 0.15s ease;
+}
+
+.bd-main .bd-content .sd-card:hover {
+    border-color: var(--mf-accent);
+    transform: translateY(-2px);
+}
+
+.sd-card-title {
+    font-weight: 600;
+}
+
+/* Wide tables scroll instead of widening the page. */
+.bd-content table {
+    display: block;
+    overflow-x: auto;
+    max-width: 100%;
+}
+
+.admonition.caution {
+    border-left-color: var(--mf-accent);
+}
+
+.sd-card .highlight pre {
+    font-size: 0.85em;
+}
+
+/* The boxed model equation on the landing page. */
+.mf-equation {
+    background: var(--mf-accent-soft);
+    border-left: 3px solid var(--mf-accent);
+    padding: 0.4em 1em;
+    margin: 1em 0;
+}

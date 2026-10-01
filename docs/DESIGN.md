@@ -4,7 +4,7 @@ The full specification — every equation, the identifiability argument, the
 shapes table, what was deliberately excluded and why, and the open questions —
 is the paper:
 
-**[`docs/paper/modulefinder.pdf`](paper/modulefinder.pdf)** (6 pp.)
+**[`docs/paper/modulefinder.pdf`](paper/modulefinder.pdf)** (9 pp.)
 
 Rebuild it with `make -C docs/paper`. The source is `docs/paper/modulefinder.tex`.
 

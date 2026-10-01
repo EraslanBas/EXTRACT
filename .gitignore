@@ -1,8 +1,11 @@
 # ---- Large data artifacts ----
 # data/ and results/ now live under $MODULEFINDER_ROOT on large_storage
 # (see docs/data_layout.md); these entries guard against re-creating them here.
-data/
-results/
+# NOTE the leading slash: an unanchored `data/` matches a directory of that name
+# at ANY depth, which silently untracked the whole src/module_finder/data/
+# source package. Keep these anchored to the repo root.
+/data/
+/results/
 de_benchmark/
 SRC/DATA/
 SRC/results/
@@ -43,3 +46,17 @@ docs/paper/*.aux
 docs/paper/*.log
 docs/paper/*.out
 docs/paper/*.png
+
+# ---- Documentation build ----
+docs/_build/
+
+# ---- Local tooling and one-off operational files ----
+.claude/
+.pytest_cache/
+notebooks/untitled.txt
+docs/HANDOFF.md
+scripts/augment_after_matrix.sh
+scripts/build_matrices_when_ready.sh
+scripts/finish_jte607.sh
+scripts/resume_after_orphans.sh
+scripts/launch_e500.sh

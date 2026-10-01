@@ -1,121 +1,67 @@
 # ModuleFinder
 
-Identifiable latent factors from perturbation x context screens, plus the
-perturb-seq simulator used to generate ground truth and the baselines to beat.
+Gene programs from perturbation × context screens.
+
+ModuleFinder fits one global matrix of gene programs `B` (factors × genes) to a
+screen in which every perturbation is measured in several contexts (drug
+backgrounds, cell lines, timepoints, donors). Factor activations are the masked
+least-squares projection of each response onto `B`, so there is one map between
+factors and genes. `B` is fitted by
+
+    L = L_disc + alpha * L_recon
+
+where reconstruction fixes the subspace of the programs and a per-component
+contrastive head (does this response belong to this perturbation in this
+context?) fixes their orientation inside it.
+
+**Documentation:** https://eraslanbas.github.io/ModuleFinder/ — the method,
+page by page. The full specification is the method paper,
+[`docs/paper/modulefinder.pdf`](docs/paper/modulefinder.pdf).
 
 ## Layout
 
 ```
-src/module_finder/      the model (see docs/DESIGN.md)
-    de/                 shrunken-logFC pipeline (see docs/posterior_matrices.md)
-    data/               (p,c) x gene matrices; fixed-n cell pseudo-replicates
-    models/             linear encoder, per-component head, global linear decoder
-    objectives/         contrastive discrimination + reconstruction anchor
-    interpret/          gene loadings, mu_p / gamma_c / delta_pc, enrichment export
-    evaluation/         cross-seed stability, held-out (p,c) generalisation
-    train.py            training loop
-src/perturbseq_sim/     the simulator, promoted out of the notebooks
-src/baselines/          pca, linear_ica, context_jd + mofa/muvi/svae_plus adapters
-
-notebooks/simulator/    01-09, the data-generation pipeline
-notebooks/analysis/     context distance sweep
-notebooks/baselines/    MOFA on simulated perturb-seq
-scripts/                build_posterior_matrices.py (CLI) + de/ legacy scripts
-de_benchmark/           DE-method comparison outputs (53 GB, gitignored)
-data/                   simulator artifacts + h5ads (40 GB, gitignored)
-results/                de_chunks/, mofa/ (gitignored)
-external/               vendored MuVI, ashr (own .git)
-reference/go_data/      NCBI/GO downloads (gitignored)
-docs/                   DESIGN.md, posterior_matrices.md, SIMULATION_PIPELINE.md
-tests/                  36 tests, `pytest tests`
+src/module_finder/      the method
+    de/                 shrunken-logFC pipeline (Welch + ashr), per context
+    data/               gene filter, on-target mask, leak-free splits, synthetic rows
+    models/             global loadings B, per-component head, label network
+    objectives/         contrastive discrimination, precision-weighted reconstruction
+    interpret/          loadings, sign anchoring, effect decomposition, enrichment export
+    evaluation/         span test, cross-seed stability, held-out evaluation
+    train.py            training loop and evaluation
+src/perturbseq_sim/     perturb-seq simulator
+src/baselines/          PCA, linear ICA, joint diagonalisation, adapters
+scripts/                CLIs: logFC matrices, split, fit, sweep, summaries, test read
+docs/source/            documentation site (Sphinx)
+docs/paper/             method paper
+notebooks/              simulator and analysis notebooks
+tests/                  unit tests, no screen data needed
 ```
 
-**The import name is `module_finder`, not `modulefinder`** — the latter is a
-Python standard-library module and would be shadowed.
+The import name is **`module_finder`**, not `modulefinder` (a Python
+standard-library module).
 
 ## Install
 
 ```bash
-pip install -e .                      # or run with PYTHONPATH=src
-pytest tests                          # 36 tests, ~3s, no data needed
+pip install -e .                 # or run with PYTHONPATH=src
+python -m pytest -q tests/
 ```
 
-## Quickstart
+Building logFC matrices from single-cell data additionally needs R with `ashr`.
 
-```python
-from module_finder.data import load_rowbound
-from module_finder.train import TrainConfig, fit, encode
-from module_finder.interpret import decompose_effects, loadings_from_decoder
-from module_finder.evaluation import split_pair_holdout, reconstruction_score
+## Data
 
-ds = load_rowbound(
-    "/home/beraslan/Projects/ChemoGeneticScreens/TextFiles/"
-    "PosteriorMeanMatrices_rowbound_anyDrugSig_geneMed40.csv",
-    context_column="drug",
-)                                     # rows are already (perturbation, context)
+The repository holds code only. Data artifacts (matrices, splits, sweep
+outputs) live under `$MODULEFINDER_ROOT`; resolve paths with
+`module_finder.paths`. See [`docs/data_layout.md`](docs/data_layout.md).
 
-split = split_pair_holdout(ds.perturbations[ds.perturbation_idx],
-                           ds.contexts[ds.context_idx], frac=0.1)
-
-model, history = fit(ds.X[split.train],
-                     ds.perturbation_idx[split.train],
-                     ds.context_idx[split.train],
-                     TrainConfig(n_factors=20))
-
-B = loadings_from_decoder(model.loadings, ds.genes, ds.gene_scale)   # LFC units
-Z = encode(model, ds.X)
-effects = decompose_effects(Z, ds.perturbations[ds.perturbation_idx],
-                            ds.contexts[ds.context_idx])
-print(effects.variance_shares())      # perturbation / context / interaction
-```
-
-## Generating shrunken logFC matrices
-
-Run this from the **command line, not a notebook** — the objects are hundreds of
-GB resident and a kernel will die holding them. Each context gets its own
-subprocess.
+## Documentation
 
 ```bash
-python scripts/build_posterior_matrices.py \
-    --screen-dir /processed_datasets/VCI/ChemoGenetic_H1_Basak \
-    --out-dir    /large_storage/ctc/<user>/ModuleFinder/posterior_matrices \
-    --n-control-cells 100000 --n-subsamples 6 --spacing log
+pip install -r docs/requirements.txt
+make -C docs html                # -> docs/_build/html/index.html
 ```
 
-Each perturbation gets a full-data row plus one row per subsample, in one
-matrix per context, with the cell count behind every row recorded. Resumable
-and safe to re-run. Requires R with `ashr`.
-
-See **[docs/posterior_matrices.md](docs/posterior_matrices.md)** for the
-parameters, how to size memory against a Slurm cgroup (not `free`), and the
-output layout.
-
-## Run the cheap baselines first
-
-With a global linear decoder this model *is* linear ICA with auxiliary
-variables, so the baselines estimate the same model class in minutes. Hold the
-contrastive model to beating them on held-out `(p,c)` reconstruction.
-
-```python
-import baselines
-m = baselines.get("linear_ica")(n_factors=20).fit(ds.X, contexts=...)
-m = baselines.get("context_jd")(n_factors=20).fit(ds.X, contexts=...)  # 16-context route
-```
-
-If they win, that is a real result about the data, not a failed experiment.
-
-## Notebooks
-
-The simulator notebooks run **unedited** from `notebooks/simulator/`. Each
-directory carries thin compatibility shims (`libraries.py`, `GetGOPrograms.py`,
-...) that re-export from `src/perturbseq_sim/`, plus a `DATA -> ../../data`
-symlink so `Path('./DATA')` still resolves. Delete a shim once its notebook has
-been converted to `from perturbseq_sim... import ...`.
-
-## Status
-
-Implemented and tested: the model, both objectives, interpretation, evaluation,
-and the `pca` / `linear_ica` / `context_jd` baselines.
-Adapters that raise a "not wired up" message: `mofa`, `muvi`, `svae_plus`.
-Never run on real screen data yet — every number in `docs/DESIGN.md` marked
-synthetic came from generated data.
+The site is rebuilt and published to GitHub Pages on every push to `main`
+(`.github/workflows/docs.yml`).
