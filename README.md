@@ -3,6 +3,8 @@
 **EX**pression programs from **T**reatment **R**esponses **A**cross **C**ontexts
 via **T**ensors.
 
+**Documentation: https://eraslanbas.github.io/EXTRACT/**
+
 ## What it is for
 
 Perturbation screens are increasingly run in more than one context: the same
@@ -70,9 +72,6 @@ so there is one map between factors and genes. `B` is fitted by
 where reconstruction fixes the subspace of the programs and a per-component
 contrastive head (does this response belong to this perturbation in this
 context?) fixes their orientation inside it.
-
-**Documentation:** https://eraslanbas.github.io/EXTRACT/ — the method,
-page by page.
 
 ## Layout
 
