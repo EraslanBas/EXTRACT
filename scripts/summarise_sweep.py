@@ -32,7 +32,7 @@ from pathlib import Path
 import numpy as np, pandas as pd
 
 TAG = re.compile(r"history_d(?P<d>\d+)_a(?P<alpha>[\d.eE+-]+)_b(?P<beta>[\d.eE+-]+)"
-                 r"_K(?P<K>\d+)_seed(?P<seed>\d+)\.csv$")
+                 r"_K(?P<K>\d+)_seed(?P<seed>\d+)(?:_(?P<subspace>fixed|anchored))?\.csv$")
 CURVE = ["total", "disc", "recon", "recon_measured", "recon_synth", "accuracy"]
 
 

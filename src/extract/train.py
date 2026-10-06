@@ -19,7 +19,8 @@ import torch.nn.functional as F
 from torch import nn
 
 from .data.ontarget import on_target_index
-from .models import FactorizedLabelNet, GlobalLoadings, PerComponentHead, UnconstrainedHead
+from .models import (FactorizedLabelNet, FixedBasisLoadings, GlobalLoadings,
+                     PerComponentHead, UnconstrainedHead)
 from .models.heads import DEFAULT_BASIS
 from .models.loadings import NO_MASK
 from .objectives import (
@@ -92,6 +93,13 @@ class TrainConfig:
     seed: int = 0
     device: str = "cpu"
 
+    #: How the span of B is set (needs ``subspace_basis`` in :func:`fit`):
+    #: ``"free"`` -- learned, as always; ``"fixed"`` -- B = A V with V fixed and
+    #: only A learned, so the discriminator picks oblique axes inside span(V);
+    #: ``"anchored"`` -- B free, initialised at V, with reconstruction measured
+    #: in the correlated-noise metric (needs ``noise_model``).
+    subspace: str = "free"
+
     #: Ablation only: replaces the per-component head with an MLP, which
     #: destroys identifiability. See models.heads.UnconstrainedHead.
     unconstrained_head: bool = False
@@ -144,10 +152,27 @@ class Extract(nn.Module):
         n_perturbations: int,
         n_contexts: int,
         config: TrainConfig,
+        subspace_basis: np.ndarray | None = None,
+        noise_model=None,
     ):
         super().__init__()
         self.config = config
-        self.loadings = GlobalLoadings(config.n_factors, n_genes, ridge=config.ridge)
+        if config.subspace not in ("free", "fixed", "anchored"):
+            raise ValueError(f"unknown subspace mode {config.subspace!r}")
+        if config.subspace != "free" and subspace_basis is None:
+            raise ValueError(f"subspace={config.subspace!r} needs subspace_basis")
+        if subspace_basis is not None and np.asarray(subspace_basis).shape != (config.n_factors, n_genes):
+            raise ValueError(f"subspace_basis must be [{config.n_factors}, {n_genes}]")
+        if config.subspace == "fixed":
+            self.loadings = FixedBasisLoadings(subspace_basis, ridge=config.ridge)
+        else:
+            self.loadings = GlobalLoadings(config.n_factors, n_genes, ridge=config.ridge)
+            if config.subspace == "anchored":
+                if noise_model is None:
+                    raise ValueError("subspace='anchored' needs noise_model")
+                with torch.no_grad():
+                    self.loadings.B.copy_(torch.as_tensor(np.asarray(subspace_basis), dtype=torch.float32))
+                self.loadings.set_noise_metric(noise_model.U, noise_model.s, noise_model.c)
         self.head = (
             UnconstrainedHead(config.n_factors, len(config.basis))
             if config.unconstrained_head
@@ -218,6 +243,8 @@ def fit(
     is_real: np.ndarray | None = None,
     on_eval: Callable[[int, Extract], None] | None = None,
     synth_level: np.ndarray | None = None,
+    subspace_basis: np.ndarray | None = None,
+    noise_model=None,
 ) -> tuple[Extract, list[dict]]:
     """Fit the model. Returns ``(model, history)``.
 
@@ -330,6 +357,8 @@ def fit(
         n_perturbations=n_perturbations,
         n_contexts=n_contexts,
         config=config,
+        subspace_basis=subspace_basis,
+        noise_model=noise_model,
     ).to(device)
 
     weights = dict(config.negative_weights or DEFAULT_WEIGHTS)

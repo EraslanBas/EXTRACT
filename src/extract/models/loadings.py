@@ -20,6 +20,7 @@ equation numbers in the comments below refer to it.
 
 from __future__ import annotations
 
+import numpy as np
 import torch
 from torch import nn
 
@@ -145,6 +146,20 @@ class GlobalLoadings(nn.Module):
         difference against within-context controls, so zero is the reference."""
         return z @ self.B
 
+    # ---- optional noise metric ------------------------------------------
+
+    def set_noise_metric(self, U: np.ndarray, s: np.ndarray, c: float) -> None:
+        """Measure reconstruction error in ``M~ = I + U diag(s/c) U^T``.
+
+        The noise metric ``M = c I + U diag(s) U^T`` rescaled so directions with
+        no correlated noise keep weight 1 (so ``alpha`` keeps its meaning), and
+        each shared-noise direction ``u_k`` is down-weighted by ``c / (c + s_k)``.
+        No gene's own scale changes.
+        """
+        self.register_buffer("metric_U", torch.as_tensor(U, dtype=torch.float32))
+        self.register_buffer("metric_w", torch.as_tensor(
+            np.asarray(s) / (float(c) + np.asarray(s)), dtype=torch.float32))
+
     def squared_error(
         self,
         x: torch.Tensor,
@@ -154,9 +169,25 @@ class GlobalLoadings(nn.Module):
         """Per-row ``|| m * (x - z B) ||^2 / n_retained`` -- [batch].
 
         Divided by the number of retained genes so the scale does not depend on
-        ``G`` or on whether a row masks anything.
+        ``G`` or on whether a row masks anything. With a noise metric set
+        (:meth:`set_noise_metric`) the squared norm is ``r M~^{-1} r^T`` of the
+        masked residual instead.
         """
         resid = x - self.reconstruct(z)
+        if getattr(self, "metric_U", None) is not None:
+            r = resid
+            if target_col is not None:
+                masked = target_col != NO_MASK
+                if masked.any():
+                    rows = torch.nonzero(masked, as_tuple=True)[0]
+                    r = resid.clone()
+                    r[rows, target_col[rows]] = 0.0
+            proj = r @ self.metric_U
+            sq = r.pow(2).sum(1) - (proj.pow(2) * self.metric_w).sum(1)
+            n_kept = torch.full_like(sq, float(self.n_genes))
+            if target_col is not None:
+                n_kept = n_kept - (target_col != NO_MASK).to(sq.dtype)
+            return sq / n_kept
         sq = resid.pow(2).sum(dim=1)
         n_kept = torch.full_like(sq, float(self.n_genes))
         if target_col is not None:
@@ -200,3 +231,26 @@ class GlobalLoadings(nn.Module):
                 x[rows, target_col[rows]] = 0.0
         num = torch.linalg.norm(resid, dim=1)
         return num / torch.linalg.norm(x, dim=1).clamp_min(1e-12)
+
+
+class FixedBasisLoadings(GlobalLoadings):
+    """``B = A V`` with ``V`` [d, G] fixed and only ``A`` [d, d] learned.
+
+    The span of ``B`` is the span of ``V`` and cannot move, so reconstruction is
+    fixed by ``V`` and the discriminator chooses only the axes inside it --
+    oblique ones, since ``A`` is any invertible matrix: the structure of ICA
+    (whiten, then unmix) with the separable head as the unmixing criterion.
+    Every method of :class:`GlobalLoadings` works unchanged through ``B``.
+    """
+
+    def __init__(self, V: np.ndarray, ridge: float = 1e-4):
+        nn.Module.__init__(self)
+        V = torch.as_tensor(np.asarray(V), dtype=torch.float32)
+        self.n_factors, self.n_genes = V.shape
+        self.ridge = ridge
+        self.register_buffer("V", V)
+        self.A = nn.Parameter(torch.eye(self.n_factors))
+
+    @property
+    def B(self) -> torch.Tensor:  # type: ignore[override]
+        return self.A @ self.V

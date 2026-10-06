@@ -7,10 +7,11 @@ masked least-squares projection of ``x`` onto ``B``'s row space, derived from
 
 from .heads import BASIS_FUNCTIONS, DEFAULT_BASIS, PerComponentHead, UnconstrainedHead
 from .label_net import FactorizedLabelNet
-from .loadings import NO_MASK, GlobalLoadings
+from .loadings import NO_MASK, FixedBasisLoadings, GlobalLoadings
 
 __all__ = [
     "GlobalLoadings",
+    "FixedBasisLoadings",
     "NO_MASK",
     "PerComponentHead",
     "UnconstrainedHead",

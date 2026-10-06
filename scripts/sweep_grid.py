@@ -168,6 +168,15 @@ def main() -> int:
                          "its metrics row written to cells/<tag>.csv. Cells "
                          "run in descending K (longest first); a worker only "
                          "takes the K values it was given")
+    ap.add_argument("--subspace", nargs="+", default=["free"],
+                    choices=["free", "fixed", "anchored"],
+                    help="how span(B) is set; a grid dimension. fixed / anchored use "
+                         "the label-driven subspace from the subsample noise "
+                         "(extract.data.noise); tags get a _<mode> suffix")
+    ap.add_argument("--noise-rank", type=int, default=50,
+                    help="rank of the correlated-noise part of the noise model")
+    ap.add_argument("--noise-max-rows", type=int, default=150_000,
+                    help="subsample residuals used to fit the noise model")
     ap.add_argument("--no-test", action="store_true",
                     help="skip the test read entirely (strictest discipline)")
     args = ap.parse_args()
@@ -226,8 +235,28 @@ def main() -> int:
         Xte, mte = Xte[kte], mte[kte].reset_index(drop=True)
         print(f"test {len(mte):,} rows", flush=True)
 
+    # ---- noise model and label-driven subspaces (train pairs only) -----
+    noise_model, bases = None, {}
+    if set(args.subspace) - {"free"}:
+        from extract.data.noise import label_subspace, noise_covariance, subsample_residuals
+        t1 = time.time()
+        train_real = real & ~val_all
+        R = subsample_residuals(Xtv, mtv, train_real, max_rows=args.noise_max_rows,
+                                seed=args.draw_seed)
+        noise_model = noise_covariance(R, rank=args.noise_rank, seed=args.draw_seed)
+        del R
+        full = train_real & (mtv.variant == "main").to_numpy()
+        for d_ in sorted(set(args.d)):
+            bases[d_], ev = label_subspace(Xtv[full], mtv.n_cells.to_numpy()[full],
+                                           noise_model, d_)
+            np.save(args.out_dir / f"subspace_V_d{d_}.npy", bases[d_])
+        np.savez(args.out_dir / "noise_model.npz", diag=noise_model.diag,
+                 U=noise_model.U, s=noise_model.s)
+        print(f"noise model rank {args.noise_rank} from train-pair subsamples; "
+              f"label subspaces for d={sorted(bases)}  ({time.time()-t1:.0f}s)", flush=True)
+
     cells = [c for c in itertools.product(args.d, args.alpha, args.beta,
-                                          args.n_subsamples, args.seeds)]
+                                          args.n_subsamples, args.seeds, args.subspace)]
     if queue is not None:
         # longest first (cost grows with K): the expensive cells start early
         # and the cheap ones fill the tail, which shortens the makespan
@@ -235,8 +264,8 @@ def main() -> int:
     print(f"{len(cells)} cells, {len(cells)-len(done)} to run\n", flush=True)
 
     records = []
-    for i, (d, a, b, K, seed) in enumerate(cells, 1):
-        tag = f"d{d}_a{a:g}_b{b:g}_K{K}_seed{seed}"
+    for i, (d, a, b, K, seed, sub) in enumerate(cells, 1):
+        tag = f"d{d}_a{a:g}_b{b:g}_K{K}_seed{seed}" + ("" if sub == "free" else f"_{sub}")
         # re-read each time: cheap, and means a cell finished by any earlier
         # or concurrent process is never repeated
         if queue is not None:
@@ -260,10 +289,11 @@ def main() -> int:
                           device=args.device, log_every=0,
                           eval_every=args.eval_every, patience=args.patience,
                           min_epochs=args.min_epochs,
-                          select_on=args.select_on)
+                          select_on=args.select_on, subspace=sub)
         snaps: dict[int, np.ndarray] = {}
         model, hist = fit(config=cfg, train_rows=~val, val_rows=val,
                           is_real=is_real, synth_level=synth_level,
+                          subspace_basis=bases.get(d), noise_model=noise_model,
                           on_eval=lambda ep, m: snaps.__setitem__(ep, m.loading_matrix().copy()),
                           **fa)
         pd.DataFrame(hist).to_csv(args.out_dir/f"history_{tag}.csv", index=False)
@@ -292,6 +322,7 @@ def main() -> int:
         fa["is_real"] = is_real
         fa["synth_level"] = synth_level
         row = {"tag": tag, "d": d, "alpha": a, "beta": b, "K": K, "seed": seed,
+               "subspace": sub,
                "epochs_run": len(hist), "seconds": round(time.time()-t, 1)}
         for name, rows_ in (("train", np.nonzero(~val)[0]), ("val", np.nonzero(val)[0])):
             m = score(fa, rows_, X_t, col_t, w_t)
