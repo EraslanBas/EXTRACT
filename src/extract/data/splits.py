@@ -187,6 +187,98 @@ def thin_synthetic(
     return keep
 
 
+# ---- graded synthetic rows ----------------------------------------------------
+
+#: Fractions of gene columns shuffled in a synthetic row. 1.0 is the original
+#: fully shuffled matrix; smaller fractions leave the rest of the row's genes at
+#: their real values, so the negative is harder to reject.
+SHUFFLE_LEVELS = (0.2, 0.4, 0.6, 0.8, 1.0)
+
+#: Salt for the level assignment, so it is independent of the keep/drop draw
+#: of :func:`thin_synthetic` (which hashes the same row ids with ``seed``).
+_LEVEL_SALT = 104_729
+
+
+def _shuffled_file(name: str, frac: float, seed: int) -> str:
+    """File name of a context's synthetic rows at one shuffle fraction. The
+    fully shuffled level keeps its original name, so older splits still load."""
+    if frac >= 1.0:
+        return f"{name}_shuffled_seed{seed}.parquet"
+    return f"{name}_shuffled_frac{frac:g}_seed{seed}.parquet"
+
+
+def assign_shuffle_levels(
+    row_ids, levels: tuple[float, ...] = SHUFFLE_LEVELS, seed: int = 0
+) -> np.ndarray:
+    """The shuffle fraction each measured row's synthetic twin is taken from.
+
+    Uniform over ``levels``, fixed by the row id alone, so it is the same in
+    every fit and nested across ``K``; independent of :func:`thin_synthetic`,
+    which therefore keeps exactly the synthetic rows it kept before levels
+    existed. The number of synthetic negatives is unchanged; only their
+    difficulty varies.
+    """
+    u = _stable_uniform(np.asarray(row_ids, dtype=str), seed + _LEVEL_SALT)
+    idx = np.minimum((u * len(levels)).astype(int), len(levels) - 1)
+    return np.asarray(levels, dtype=float)[idx]
+
+
+def add_shuffle_levels(
+    split_dir: str | Path,
+    fracs: tuple[float, ...] = (0.2, 0.4, 0.6, 0.8),
+    matrices_dir: str | Path | None = None,
+    shuffle_seeds: tuple[int, ...] | None = None,
+) -> dict:
+    """Write partially shuffled synthetic rows into an existing split.
+
+    Uses exactly the construction of the fully shuffled rows in
+    :func:`build_split` with ``shuffle_within="context"``: each context's rows
+    are shuffled together, before the split, and every synthetic row goes to
+    the partition of the label it carries. A fraction ``f`` permutes a random
+    ``f`` of the gene columns (chosen per context) across rows; the other
+    columns keep the row's own values. Real rows, test pairs and the gene list
+    are untouched. Returns the updated manifest.
+    """
+    from ..de.shards import context_seed
+    import pyarrow.parquet as pq
+    from .augment import shuffle_matrix
+
+    split_dir = Path(split_dir)
+    manifest = json.loads((split_dir / "manifest.json").read_text())
+    if not str(manifest.get("shuffled_within", "")).startswith("context"):
+        raise ValueError("graded levels are defined for context-wide shuffling only")
+    matrices_dir = Path(matrices_dir or manifest["source_matrices"])
+    seeds = tuple(shuffle_seeds or manifest.get("shuffle_seeds", [0]))
+    genes = [str(g) for g in load_gene_list(split_dir / "gene_list.tsv")]
+    held = {f"{p}|{c}" for p, c in pd.read_csv(split_dir / "test_pairs.tsv", sep="\t")
+            .astype(str).itertuples(index=False)}
+    for n in manifest["contexts"]:
+        m = pd.read_csv(matrices_dir / f"{n}_row_metadata.csv")
+        table = pq.read_table(matrices_dir / f"{n}_PosteriorMean.parquet",
+                              columns=["label"] + genes).to_pandas()
+        if not (table.label.to_numpy() == m.label.to_numpy()).all():
+            raise ValueError(f"{n}: matrix and metadata row order disagree")
+        in_test = _pair_key(m).isin(held).to_numpy()
+        values = table[genes].to_numpy(dtype=np.float32)
+        for k in seeds:
+            for f in fracs:
+                fake_all = shuffle_matrix(values, seed=context_seed(f"{n}|frac{f:g}", k), frac=f)
+                for part, mask in (("trainval", ~in_test), ("test", in_test)):
+                    rows = np.nonzero(mask)[0]
+                    saved = pd.read_csv(split_dir / part / f"{n}_row_metadata.csv",
+                                        usecols=["label"])
+                    if not (saved.label.to_numpy() == table.label.to_numpy()[rows]).all():
+                        raise ValueError(f"{part}/{n}: split rows do not match the matrix")
+                    fake = pd.DataFrame(fake_all[rows], columns=genes)
+                    fake.insert(0, "label", table.label.to_numpy()[rows])
+                    _write_atomic_parquet(fake, split_dir / part / _shuffled_file(n, f, k))
+        print(f"[levels] {n}: {', '.join(f'{f:g}' for f in fracs)}", flush=True)
+        del table, values
+    manifest["shuffle_levels"] = sorted(set(manifest.get("shuffle_levels", [1.0])) | set(fracs))
+    (split_dir / "manifest.json").write_text(json.dumps(manifest, indent=2))
+    return manifest
+
+
 # ---- building and loading ---------------------------------------------------
 
 
@@ -342,11 +434,16 @@ def load_partition(
     contexts: list[str] | None = None,
     shuffled: bool = True,
     shuffle_seed: int = 0,
+    shuffle_levels: tuple[float, ...] | None = None,
 ) -> tuple[np.ndarray, pd.DataFrame, np.ndarray]:
     """``(X, meta, genes)`` for one partition, measured rows first.
 
     ``meta`` carries ``is_real``; with ``shuffled=True`` the synthetic rows
-    follow the measured ones, one per measured row, with the same label.
+    follow the measured ones, one per measured row, with the same label, and
+    ``meta.shuffle_frac`` says what fraction of their genes was shuffled.
+    ``shuffle_levels=None`` loads the fully shuffled rows only; a tuple such as
+    :data:`SHUFFLE_LEVELS` takes each measured row's twin from the level
+    :func:`assign_shuffle_levels` gives it.
     """
     if partition not in PARTITIONS:
         raise ValueError(f"partition must be one of {PARTITIONS}, got {partition!r}")
@@ -371,11 +468,19 @@ def load_partition(
         real_x.append(block[cols].to_numpy(dtype=np.float32))
         real_m.append(m.assign(is_real=True))
         if shuffled:
-            fb = pd.read_parquet(d / f"{n}_shuffled_seed{shuffle_seed}.parquet")
-            if not (fb.label.to_numpy() == m.label.to_numpy()).all():
-                raise ValueError(f"{partition}/{n}: shuffled rows out of order")
-            fake_x.append(fb[cols].to_numpy(dtype=np.float32))
-            fake_m.append(m.assign(is_real=False,
+            levels = tuple(shuffle_levels) if shuffle_levels else (1.0,)
+            lev = (assign_shuffle_levels(m.row_id, levels, shuffle_seed)
+                   if len(levels) > 1 else np.full(len(m), levels[0]))
+            fx = np.empty((len(m), len(cols)), dtype=np.float32)
+            for f in levels:
+                fb = pd.read_parquet(d / _shuffled_file(n, f, shuffle_seed))
+                if not (fb.label.to_numpy() == m.label.to_numpy()).all():
+                    raise ValueError(f"{partition}/{n}: shuffled rows out of order")
+                at = lev == f
+                fx[at] = fb.loc[at, cols].to_numpy(dtype=np.float32)
+                del fb
+            fake_x.append(fx)
+            fake_m.append(m.assign(is_real=False, shuffle_frac=lev,
                                    row_id=m.row_id + "|shuffled"))
         del block
 

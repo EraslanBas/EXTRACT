@@ -23,6 +23,9 @@ from .gene_filter import (
 from .ontarget import mask_coverage, on_target_index
 from .splits import (
     PARTITIONS,
+    SHUFFLE_LEVELS,
+    add_shuffle_levels,
+    assign_shuffle_levels,
     build_split,
     draw_test_pairs,
     load_partition,
@@ -38,6 +41,9 @@ from .rowbound import (
 
 __all__ = [
     "PARTITIONS",
+    "SHUFFLE_LEVELS",
+    "add_shuffle_levels",
+    "assign_shuffle_levels",
     "build_split",
     "draw_test_pairs",
     "load_partition",

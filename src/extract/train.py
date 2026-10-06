@@ -217,6 +217,7 @@ def fit(
     val_rows: np.ndarray | None = None,
     is_real: np.ndarray | None = None,
     on_eval: Callable[[int, Extract], None] | None = None,
+    synth_level: np.ndarray | None = None,
 ) -> tuple[Extract, list[dict]]:
     """Fit the model. Returns ``(model, history)``.
 
@@ -236,6 +237,10 @@ def fit(
     is_real
         [n_rows] bool: is this row an actual *measured* response vector?
         Defaults to all-True.
+    synth_level
+        [n_rows] fraction of genes shuffled in each synthetic row (NaN for
+        measured rows). Only reported, per level, in validation; training
+        treats every synthetic row alike.
     on_eval
         Called as ``on_eval(epoch, model)`` after every validation pass, before
         the best state is restored. Used to snapshot ``B`` at each evaluation
@@ -560,6 +565,7 @@ def fit(
                         w_t,
                         is_real=is_real,
                         recon_fake_weight=config.recon_fake_weight,
+                        synth_level=synth_level,
                     ).items()
                 }
             )
@@ -639,6 +645,7 @@ def evaluate(
     is_real: np.ndarray | None = None,
     recon_fake_weight: float = 0.0,
     batch_size: int = 2048,
+    synth_level: np.ndarray | None = None,
 ) -> dict:
     """Metrics on held-out rows, scored exactly as training scores them.
 
@@ -669,6 +676,11 @@ def evaluate(
         ``||x - x B^+ B|| / ||x||`` on measured held-out rows -- eq. (14).
         Large values mean the held-out pairs need programs outside
         ``span(B)``, the one failure mode the architecture cannot absorb.
+    ``synth_accuracy_f<x>`` / ``recon_synth_f<x>``
+        With ``synth_level`` [n_rows of X] (the fraction of genes shuffled in
+        each synthetic row), the two synthetic metrics again for the synthetic
+        rows of each level: a difficulty curve, from barely altered rows (small
+        fraction) to fully shuffled ones (1.0).
     ``real_score_mean`` / ``fake_score_mean`` / ``synth_score_mean``
         The raw logits. A collapsed head shows up here as both near zero even
         when accuracy looks acceptable.
@@ -713,6 +725,8 @@ def evaluate(
          "wsq_syn", "w_syn"], 0.0)
     n_pos = n_syn = 0
     residuals = []
+    lv_all = (np.asarray(synth_level, dtype=float) if synth_level is not None else None)
+    per_level: dict[float, list[float]] = {}     # level -> [ok, n, wsq, w]
 
     for start in range(0, len(rows), batch_size):
         local = np.arange(start, min(start + batch_size, len(rows)))
@@ -773,6 +787,15 @@ def evaluate(
             t["wsq_syn"] += float((per_row_s * w_s).sum())
             t["w_syn"] += float(w_s.sum())
             n_syn += len(idx)
+            if lv_all is not None:
+                lv = lv_all[idx]
+                ok = (syn <= 0).cpu().numpy(); sq = (per_row_s * w_s).cpu().numpy()
+                ww = w_s.cpu().numpy()
+                for f in np.unique(lv[~np.isnan(lv)]):
+                    at = lv == f
+                    acc = per_level.setdefault(float(f), [0.0, 0.0, 0.0, 0.0])
+                    acc[0] += float(ok[at].sum()); acc[1] += float(at.sum())
+                    acc[2] += float(sq[at].sum()); acc[3] += float(ww[at].sum())
 
     model.train(was_training)
     r = np.concatenate(residuals)
@@ -799,6 +822,9 @@ def evaluate(
         "synth_score_mean": t["syn_sum"] / n_syn if n_syn else nan,
         "span_residual_median": float(np.median(r)),
         "span_residual_q90": float(np.quantile(r, 0.90)),
+        **{k: v for f, (ok, n, wsq, w) in sorted(per_level.items()) for k, v in (
+            (f"synth_accuracy_f{f:g}", 0.5 * (t["pos_ok"] / n_pos + ok / n)),
+            (f"recon_synth_f{f:g}", wsq / w if w else nan))},
     }
 
 

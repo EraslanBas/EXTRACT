@@ -234,3 +234,64 @@ def test_fit_model_script_runs_on_a_split(tmp_path):
         assert summary["metrics"][part]["n_synthetic"] > 0
     assert summary["hyperparameters"] == {"d": 3, "alpha": 1.0, "beta": 0.1,
                                           "K": 3, "rho": 0.5}
+
+
+def test_graded_shuffle_levels(tmp_path):
+    """add_shuffle_levels writes partially shuffled twins; loading with levels
+    keeps the same rows and the same thinning, changes only which file each
+    twin comes from, and a fraction-f twin differs from its real row in about
+    a fraction f of genes."""
+    from extract.data.splits import (SHUFFLE_LEVELS, add_shuffle_levels,
+                                     assign_shuffle_levels, thin_synthetic)
+    meta = _meta(n_pert=60, n_ctx=8, ragged=False)
+    mats = tmp_path / "matrices"; mats.mkdir()
+    _write_matrices(mats, meta)
+    out = tmp_path / "split"
+    build_split(mats, out, test_frac=0.1, min_affected=5, threshold=0.2)
+    man = add_shuffle_levels(out, (0.2, 0.4, 0.6, 0.8), matrices_dir=mats)
+    assert man["shuffle_levels"] == [0.2, 0.4, 0.6, 0.8, 1.0]
+
+    X1, m1, _ = load_partition(out, "trainval")
+    Xg, mg, _ = load_partition(out, "trainval", shuffle_levels=SHUFFLE_LEVELS)
+    assert len(m1) == len(mg) and (m1.row_id == mg.row_id).all()
+    assert (thin_synthetic(m1, 0.5) == thin_synthetic(mg, 0.5)).all()
+    real = mg.is_real.to_numpy()
+    assert np.allclose(X1[real], Xg[real])
+    lev = mg.shuffle_frac.to_numpy()[~real]
+    assert set(np.unique(lev)) == set(SHUFFLE_LEVELS)
+    # roughly uniform over the five levels
+    counts = np.array([(lev == f).mean() for f in SHUFFLE_LEVELS])
+    assert np.all(np.abs(counts - 0.2) < 0.06), counts
+    # twins at fraction f leave about 1 - f of the genes at their real values
+    Xr, Xs = Xg[real], Xg[~real]
+    for f in (0.2, 0.6):
+        at = lev == f
+        same = np.isclose(Xr[at], Xs[at]).mean()
+        assert abs(same - (1 - f)) < 0.12, (f, same)
+    # assignment is fixed by row id alone
+    ids = mg.row_id.to_numpy()[real][:50]
+    assert (assign_shuffle_levels(ids) == assign_shuffle_levels(ids[::-1])[::-1]).all()
+
+
+def test_evaluate_reports_each_shuffle_level(tmp_path):
+    from extract.data.splits import SHUFFLE_LEVELS, add_shuffle_levels
+    from extract.train import TrainConfig, fit, prepare
+    meta = _meta(n_pert=60, n_ctx=8, ragged=False)
+    mats = tmp_path / "matrices"; mats.mkdir()
+    _write_matrices(mats, meta)
+    out = tmp_path / "split"
+    build_split(mats, out, test_frac=0.1, min_affected=5, threshold=0.2)
+    add_shuffle_levels(out, (0.2, 0.4, 0.6, 0.8), matrices_dir=mats)
+    X, m, genes = load_partition(out, "trainval", shuffle_levels=SHUFFLE_LEVELS)
+    from extract.data.splits import split_val_per_perturbation, _pair_key
+    real = m.is_real.to_numpy()
+    vp = set(_pair_key(m[real])[split_val_per_perturbation(m[real], 0.15, 0)])
+    val = _pair_key(m).isin(vp).to_numpy()
+    fa = prepare(X, m, genes); fa.pop("perturbation_levels"); fa.pop("context_levels")
+    cfg = TrainConfig(n_factors=3, epochs=2, batch_size=64, eval_every=1,
+                      patience=0, log_every=0, select_on="accuracy")
+    _, hist = fit(config=cfg, train_rows=~val, val_rows=val, is_real=real,
+                  synth_level=m.shuffle_frac.to_numpy(dtype=float), **fa)
+    keys = {k for k in hist[-1] if k.startswith("val_synth_accuracy_f")}
+    assert keys == {f"val_synth_accuracy_f{f:g}" for f in SHUFFLE_LEVELS}
+    assert all(0.0 <= hist[-1][k] <= 1.0 for k in keys)

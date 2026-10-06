@@ -143,6 +143,11 @@ def main() -> int:
                     help="never stop before this; the best epoch is still restored")
     ap.add_argument("--eval-every", type=int, default=3)
     ap.add_argument("--shuffled-frac", type=float, default=0.5)
+    ap.add_argument("--shuffle-levels", type=float, nargs="+", default=None,
+                    help="graded synthetic rows: take each row's twin from one of "
+                         "these gene-shuffle fractions (e.g. 0.2 0.4 0.6 0.8 1.0); "
+                         "the number of synthetic rows is unchanged, validation "
+                         "and test report accuracy per level. Default: 1.0 only")
     ap.add_argument("--val-frac", type=float, default=0.1)
     ap.add_argument("--val-seed", type=int, default=0)
     ap.add_argument("--draw-seed", type=int, default=0)
@@ -201,8 +206,10 @@ def main() -> int:
 
     # ---------------- load once --------------------------------------
     t0 = time.time()
+    levels = tuple(args.shuffle_levels) if args.shuffle_levels else None
     Xtv, mtv, genes = load_partition(args.split_dir, "trainval", None,
-                                     shuffled=True, shuffle_seed=0)
+                                     shuffled=True, shuffle_seed=0,
+                                     shuffle_levels=levels)
     real = mtv.is_real.to_numpy()
     val_real = split_val_per_perturbation(mtv[real], args.val_frac, args.val_seed)
     val_pairs = set(_pair_key(mtv[real])[val_real])
@@ -213,7 +220,8 @@ def main() -> int:
     Xte = mte = None
     if not args.no_test:
         Xte, mte, _ = load_partition(args.split_dir, "test", None,
-                                     shuffled=True, shuffle_seed=0)
+                                     shuffled=True, shuffle_seed=0,
+                                     shuffle_levels=levels)
         kte = thin_synthetic(mte, args.shuffled_frac, seed=args.draw_seed)
         Xte, mte = Xte[kte], mte[kte].reset_index(drop=True)
         print(f"test {len(mte):,} rows", flush=True)
@@ -244,6 +252,7 @@ def main() -> int:
         keep &= thin_synthetic(mtv, args.shuffled_frac, seed=args.draw_seed)
         X, meta, val = Xtv[keep], mtv[keep].reset_index(drop=True), val_all[keep]
         is_real = meta.is_real.to_numpy()
+        synth_level = meta.shuffle_frac.to_numpy(dtype=float)
         fa = prepare(X, meta, genes)
         plev, clev = fa.pop("perturbation_levels"), fa.pop("context_levels")
         cfg = TrainConfig(n_factors=d, alpha=a, recon_fake_weight=b, seed=seed,
@@ -254,7 +263,7 @@ def main() -> int:
                           select_on=args.select_on)
         snaps: dict[int, np.ndarray] = {}
         model, hist = fit(config=cfg, train_rows=~val, val_rows=val,
-                          is_real=is_real,
+                          is_real=is_real, synth_level=synth_level,
                           on_eval=lambda ep, m: snaps.__setitem__(ep, m.loading_matrix().copy()),
                           **fa)
         pd.DataFrame(hist).to_csv(args.out_dir/f"history_{tag}.csv", index=False)
@@ -277,25 +286,28 @@ def main() -> int:
             # evaluate() indexes is_real by `rows` itself -- pass the FULL array
             return evaluate(model, Xt_, fa_["perturbation_idx"], fa_["context_idx"],
                             rows, s, np.random.default_rng(12345), ct_, wt_,
-                            is_real=fa_["is_real"], recon_fake_weight=b)
+                            is_real=fa_["is_real"], recon_fake_weight=b,
+                            synth_level=fa_.get("synth_level"))
 
         fa["is_real"] = is_real
+        fa["synth_level"] = synth_level
         row = {"tag": tag, "d": d, "alpha": a, "beta": b, "K": K, "seed": seed,
                "epochs_run": len(hist), "seconds": round(time.time()-t, 1)}
         for name, rows_ in (("train", np.nonzero(~val)[0]), ("val", np.nonzero(val)[0])):
             m = score(fa, rows_, X_t, col_t, w_t)
-            for k in METRICS:
+            for k in METRICS + tuple(k for k in m if k.startswith(("synth_accuracy_f", "recon_synth_f"))):
                 row[f"{name}_{k}"] = m.get(k)
         if Xte is not None:
             fte = prepare(Xte, mte, genes, perturbation_levels=plev,
                           context_levels=clev)
             fte.pop("perturbation_levels", None); fte.pop("context_levels", None)
             fte["is_real"] = mte.is_real.to_numpy()
+            fte["synth_level"] = mte.shuffle_frac.to_numpy(dtype=float)
             m = score(fte, np.arange(len(mte)),
                       torch.from_numpy(fte["X"]),
                       torch.from_numpy(fte["target_col"]),
                       torch.from_numpy(precision_weights(fte["n_cells"]).astype(np.float32)))
-            for k in METRICS:
+            for k in METRICS + tuple(k for k in m if k.startswith(("synth_accuracy_f", "recon_synth_f"))):
                 row[f"test_{k}"] = m.get(k)
         records.append(row)
         if queue is not None:
