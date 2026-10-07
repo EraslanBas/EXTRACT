@@ -169,10 +169,14 @@ def main() -> int:
                          "run in descending K (longest first); a worker only "
                          "takes the K values it was given")
     ap.add_argument("--subspace", nargs="+", default=["free"],
-                    choices=["free", "fixed", "anchored"],
+                    choices=["free", "fixed", "anchored", "frozen"],
                     help="how span(B) is set; a grid dimension. fixed / anchored use "
                          "the label-driven subspace from the subsample noise "
                          "(extract.data.noise); tags get a _<mode> suffix")
+    ap.add_argument("--basis", nargs="+", default=None, metavar="NAME=PATH",
+                    help="external axes for fixed / frozen, e.g. ica=B_ica_d26.npy "
+                         "(a [d, G] .npy); a grid dimension. Default: the "
+                         "label-driven subspace V. Tags get _<mode>_<name>")
     ap.add_argument("--noise-rank", type=int, default=50,
                     help="rank of the correlated-noise part of the noise model")
     ap.add_argument("--noise-max-rows", type=int, default=150_000,
@@ -255,8 +259,16 @@ def main() -> int:
         print(f"noise model rank {args.noise_rank} from train-pair subsamples; "
               f"label subspaces for d={sorted(bases)}  ({time.time()-t1:.0f}s)", flush=True)
 
+    # NAME=PATH loads external axes; a bare "V" means the label-driven subspace
+    ext_bases = {}
+    for kv in (args.basis or []):
+        name, _, path = kv.partition("=")
+        ext_bases[name] = np.load(path).astype(np.float32) if path else None
+    basis_names = list(ext_bases) or [None]
     cells = [c for c in itertools.product(args.d, args.alpha, args.beta,
-                                          args.n_subsamples, args.seeds, args.subspace)]
+                                          args.n_subsamples, args.seeds, args.subspace,
+                                          basis_names)
+             if c[5] in ("fixed", "frozen") or c[6] == basis_names[0]]
     if queue is not None:
         # longest first (cost grows with K): the expensive cells start early
         # and the cheap ones fill the tail, which shortens the makespan
@@ -264,8 +276,11 @@ def main() -> int:
     print(f"{len(cells)} cells, {len(cells)-len(done)} to run\n", flush=True)
 
     records = []
-    for i, (d, a, b, K, seed, sub) in enumerate(cells, 1):
-        tag = f"d{d}_a{a:g}_b{b:g}_K{K}_seed{seed}" + ("" if sub == "free" else f"_{sub}")
+    for i, (d, a, b, K, seed, sub, bname) in enumerate(cells, 1):
+        named = bname is not None and sub in ("fixed", "frozen")
+        use_ext = named and ext_bases[bname] is not None
+        tag = (f"d{d}_a{a:g}_b{b:g}_K{K}_seed{seed}" + ("" if sub == "free" else f"_{sub}")
+               + (f"_{bname}" if named else ""))
         # re-read each time: cheap, and means a cell finished by any earlier
         # or concurrent process is never repeated
         if queue is not None:
@@ -293,7 +308,8 @@ def main() -> int:
         snaps: dict[int, np.ndarray] = {}
         model, hist = fit(config=cfg, train_rows=~val, val_rows=val,
                           is_real=is_real, synth_level=synth_level,
-                          subspace_basis=bases.get(d), noise_model=noise_model,
+                          subspace_basis=(ext_bases[bname] if use_ext else bases.get(d)),
+                          noise_model=noise_model,
                           on_eval=lambda ep, m: snaps.__setitem__(ep, m.loading_matrix().copy()),
                           **fa)
         pd.DataFrame(hist).to_csv(args.out_dir/f"history_{tag}.csv", index=False)
@@ -322,7 +338,7 @@ def main() -> int:
         fa["is_real"] = is_real
         fa["synth_level"] = synth_level
         row = {"tag": tag, "d": d, "alpha": a, "beta": b, "K": K, "seed": seed,
-               "subspace": sub,
+               "subspace": sub, "basis": (bname if named else ("V" if sub != "free" else "")),
                "epochs_run": len(hist), "seconds": round(time.time()-t, 1)}
         for name, rows_ in (("train", np.nonzero(~val)[0]), ("val", np.nonzero(val)[0])):
             m = score(fa, rows_, X_t, col_t, w_t)

@@ -243,13 +243,16 @@ class FixedBasisLoadings(GlobalLoadings):
     Every method of :class:`GlobalLoadings` works unchanged through ``B``.
     """
 
-    def __init__(self, V: np.ndarray, ridge: float = 1e-4):
+    def __init__(self, V: np.ndarray, ridge: float = 1e-4, learn_axes: bool = True):
         nn.Module.__init__(self)
         V = torch.as_tensor(np.asarray(V), dtype=torch.float32)
         self.n_factors, self.n_genes = V.shape
         self.ridge = ridge
         self.register_buffer("V", V)
-        self.A = nn.Parameter(torch.eye(self.n_factors))
+        if learn_axes:
+            self.A = nn.Parameter(torch.eye(self.n_factors))
+        else:                     # "frozen": B = V exactly, a probe of V's axes
+            self.register_buffer("A", torch.eye(self.n_factors))
 
     @property
     def B(self) -> torch.Tensor:  # type: ignore[override]

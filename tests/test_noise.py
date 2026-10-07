@@ -118,3 +118,18 @@ def test_fit_runs_in_each_subspace_mode():
             assert np.linalg.svd(Qb.T @ Qv, compute_uv=False).min() > 0.999
     with pytest.raises(ValueError):
         fit(X, p, c, s, n, config=TrainConfig(n_factors=3, subspace="fixed"), train_rows=~val)
+
+
+def test_frozen_basis_learns_nothing_in_B():
+    from extract.train import TrainConfig, fit
+    X, meta, *_ = _planted(n_pairs=80, G=30, n_sub=3)
+    meta["context"] = np.where(np.arange(len(meta)) % 2, "C0", "C1")
+    p = pd.factorize(meta.perturbation)[0]; c = pd.factorize(meta.context)[0]
+    s = np.where(meta.variant == "main", 0, 1); n = meta.n_cells.to_numpy()
+    V = np.random.default_rng(5).normal(size=(3, 30)).astype(np.float32)
+    val = meta.perturbation.isin([f"P{i}" for i in range(0, 80, 9)]).to_numpy()
+    cfg = TrainConfig(n_factors=3, epochs=2, batch_size=64, eval_every=1, patience=0,
+                      log_every=0, select_on="accuracy", subspace="frozen")
+    model, _ = fit(X, p, c, s, n, config=cfg, train_rows=~val, val_rows=val, subspace_basis=V)
+    assert np.allclose(model.loading_matrix(), V)
+    assert "loadings.A" not in dict(model.named_parameters())

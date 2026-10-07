@@ -97,7 +97,9 @@ class TrainConfig:
     #: ``"free"`` -- learned, as always; ``"fixed"`` -- B = A V with V fixed and
     #: only A learned, so the discriminator picks oblique axes inside span(V);
     #: ``"anchored"`` -- B free, initialised at V, with reconstruction measured
-    #: in the correlated-noise metric (needs ``noise_model``).
+    #: in the correlated-noise metric (needs ``noise_model``); ``"frozen"`` --
+    #: B = V exactly, nothing in it learned: a probe of how discriminative a
+    #: given set of axes (e.g. ICA's) is under the separable head.
     subspace: str = "free"
 
     #: Ablation only: replaces the per-component head with an MLP, which
@@ -157,14 +159,15 @@ class Extract(nn.Module):
     ):
         super().__init__()
         self.config = config
-        if config.subspace not in ("free", "fixed", "anchored"):
+        if config.subspace not in ("free", "fixed", "anchored", "frozen"):
             raise ValueError(f"unknown subspace mode {config.subspace!r}")
         if config.subspace != "free" and subspace_basis is None:
             raise ValueError(f"subspace={config.subspace!r} needs subspace_basis")
         if subspace_basis is not None and np.asarray(subspace_basis).shape != (config.n_factors, n_genes):
             raise ValueError(f"subspace_basis must be [{config.n_factors}, {n_genes}]")
-        if config.subspace == "fixed":
-            self.loadings = FixedBasisLoadings(subspace_basis, ridge=config.ridge)
+        if config.subspace in ("fixed", "frozen"):
+            self.loadings = FixedBasisLoadings(subspace_basis, ridge=config.ridge,
+                                               learn_axes=config.subspace == "fixed")
         else:
             self.loadings = GlobalLoadings(config.n_factors, n_genes, ridge=config.ridge)
             if config.subspace == "anchored":
