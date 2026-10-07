@@ -10,7 +10,7 @@ import torch
 from extract.data.ontarget import mask_coverage, on_target_index
 from extract.evaluation import span_residual
 from extract.models import NO_MASK, GlobalLoadings, PerComponentHead
-from extract.models.label_net import FactorizedLabelNet
+from extract.models.label_net import FactorizedLabelNet, ProductLabelNet
 from extract.objectives import (
     DEFAULT_WEIGHTS,
     StratifiedNegativeSampler,
@@ -170,6 +170,27 @@ def test_label_net_shares_embeddings_rather_than_memorising_pairs():
     net = FactorizedLabelNet(100, 8, 10, 4, embedding_dim=16, hidden=0)
     n_params = sum(p.numel() for p in net.parameters())
     assert n_params < 100 * 8 * 10  # far below one row per observed pair
+
+
+def test_product_label_net_is_a_per_factor_product():
+    torch.manual_seed(0)
+    net = ProductLabelNet(6, 3, 5, 4)
+    with torch.no_grad():
+        net.f.weight.normal_(); net.g.weight.normal_()
+    p, c = torch.tensor([1, 1, 4, 4]), torch.tensor([0, 2, 0, 2])
+    lam = net(p, c)
+    assert lam.shape == (4, 5, 4)
+    # rank one in (p, c) for every factor and statistic
+    assert torch.allclose(lam[0] * lam[3], lam[1] * lam[2], atol=1e-5)
+
+
+def test_fit_runs_with_the_product_label_model():
+    X, p, c, s, n = _toy_dataset()
+    cfg = TrainConfig(n_factors=5, epochs=6, batch_size=64, log_every=0, seed=0,
+                      label_model="product", noise_rank=3)
+    model, history = fit(X, p, c, s, n, target_col=None, config=cfg)
+    assert isinstance(model.label_net, ProductLabelNet)
+    assert history[-1]["disc"] < history[0]["disc"]
 
 
 # ----------------------------------------------------------------- negatives

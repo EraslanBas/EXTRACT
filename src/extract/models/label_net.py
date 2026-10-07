@@ -67,3 +67,36 @@ class FactorizedLabelNet(nn.Module):
         e_c = self.context_embedding(context_idx)
         lam = self.head(torch.cat([e_p, e_c], dim=-1))
         return lam.view(-1, self.n_factors, self.n_basis)
+
+
+class ProductLabelNet(nn.Module):
+    """Structured label model: ``lambda_kj(p, c) = f_kj(p) * g_kj(c)``.
+
+    Each factor's coefficients are a product of a perturbation term and a
+    context term, with no interaction beyond that product. The label-dependent
+    part of the response is then a CP (tensor) decomposition over
+    perturbations x contexts x genes. A CP decomposition is unique up to the
+    order and scale of its components, so the axes are fixed by the labels:
+    rotating ``z`` by ``W`` would need ``W (f(p) * g(c))``, which is not of
+    product form. The unstructured :class:`FactorizedLabelNet` can absorb any
+    rotation and leaves the axes free.
+
+    ``f`` and ``g`` are free tables (one ``[d, n_basis]`` entry per
+    perturbation and per context). ``g`` starts near 1 and ``f`` near 0, so
+    the product starts small without a vanishing gradient on either side.
+    """
+
+    def __init__(self, n_perturbations: int, n_contexts: int, n_factors: int, n_basis: int):
+        super().__init__()
+        self.n_factors = n_factors
+        self.n_basis = n_basis
+        self.f = nn.Embedding(n_perturbations, n_factors * n_basis)
+        self.g = nn.Embedding(n_contexts, n_factors * n_basis)
+        nn.init.normal_(self.f.weight, std=0.02)
+        nn.init.normal_(self.g.weight, mean=1.0, std=0.02)
+
+    def forward(
+        self, perturbation_idx: torch.Tensor, context_idx: torch.Tensor
+    ) -> torch.Tensor:
+        lam = self.f(perturbation_idx) * self.g(context_idx)
+        return lam.view(-1, self.n_factors, self.n_basis)

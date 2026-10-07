@@ -58,6 +58,9 @@ def build_argparser() -> argparse.ArgumentParser:
                    help="default: every context in the split")
 
     g = p.add_argument_group("model")
+    g.add_argument("--label-model", default="mlp", choices=["mlp", "product"],
+                   help="label -> lambda map: unconstrained MLP (default) or the structured "
+                        "product lambda_k(p, c) = f_k(p) g_k(c), which fixes the axes")
     g.add_argument("--subspace", default="fixed", choices=["fixed", "free", "anchored"],
                    help="fixed (default): B = A V, V the label-driven subspace computed "
                         "from the training rows, only A learned; free: B learned "
@@ -126,7 +129,8 @@ def main() -> None:
     out_dir = args.out_dir or paths.root() / "models" / split_dir.name
     out_dir.mkdir(parents=True, exist_ok=True)
     tag = (f"d{args.n_factors}_a{args.alpha:g}_b{args.beta:g}"
-           f"_K{args.n_subsamples}_seed{args.seed}_{args.subspace}")
+           f"_K{args.n_subsamples}_seed{args.seed}_{args.subspace}"
+           + ("_product" if args.label_model == "product" else ""))
 
     # ---- train/val partition only ---------------------------------------
     t0 = time.time()
@@ -168,6 +172,7 @@ def main() -> None:
         eval_every=args.eval_every, patience=args.patience,
         select_on=args.select_on, log_every=max(1, args.epochs // 25),
         subspace=args.subspace, noise_rank=args.noise_rank,
+        label_model=args.label_model,
     )
     t0 = time.time()
     model, history = fit(config=config, train_rows=train, val_rows=val,

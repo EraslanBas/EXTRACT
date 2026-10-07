@@ -19,7 +19,7 @@ import torch.nn.functional as F
 from torch import nn
 
 from .data.ontarget import on_target_index
-from .models import (FactorizedLabelNet, FixedBasisLoadings, GlobalLoadings,
+from .models import (FactorizedLabelNet, ProductLabelNet, FixedBasisLoadings, GlobalLoadings,
                      PerComponentHead, UnconstrainedHead)
 from .models.heads import DEFAULT_BASIS
 from .models.loadings import NO_MASK
@@ -118,6 +118,12 @@ class TrainConfig:
     #: ``"random"`` (a random rotation of V's axes, drawn from ``seed``).
     axes_init: str = "identity"
 
+    #: How labels map to the head's coefficients lambda. ``"mlp"``: embeddings
+    #: of p and c through an MLP, unconstrained (does not fix the axes).
+    #: ``"product"``: lambda_k(p, c) = f_k(p) * g_k(c), a CP structure that
+    #: does. See models.label_net.ProductLabelNet.
+    label_model: str = "mlp"
+
     #: Ablation only: replaces the per-component head with an MLP, which
     #: destroys identifiability. See models.heads.UnconstrainedHead.
     unconstrained_head: bool = False
@@ -198,14 +204,20 @@ class Extract(nn.Module):
             if config.unconstrained_head
             else PerComponentHead(config.basis)
         )
-        self.label_net = FactorizedLabelNet(
-            n_perturbations=n_perturbations,
-            n_contexts=n_contexts,
-            n_factors=config.n_factors,
-            n_basis=len(config.basis),
-            embedding_dim=config.embedding_dim,
-            hidden=config.label_hidden,
-        )
+        if config.label_model == "product":
+            self.label_net = ProductLabelNet(n_perturbations, n_contexts,
+                                             config.n_factors, len(config.basis))
+        elif config.label_model == "mlp":
+            self.label_net = FactorizedLabelNet(
+                n_perturbations=n_perturbations,
+                n_contexts=n_contexts,
+                n_factors=config.n_factors,
+                n_basis=len(config.basis),
+                embedding_dim=config.embedding_dim,
+                hidden=config.label_hidden,
+            )
+        else:
+            raise ValueError(f"label_model must be 'mlp' or 'product', got {config.label_model!r}")
 
     # ---- forward pieces ---------------------------------------------------
 

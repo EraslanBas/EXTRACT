@@ -184,6 +184,9 @@ def main() -> int:
     ap.add_argument("--axes-init", default="identity", choices=["identity", "random"],
                     help="fixed mode: start A at the identity or at a random rotation "
                          "(per seed); random adds _Arandom to the tag")
+    ap.add_argument("--label-model", default="mlp", choices=["mlp", "product"],
+                    help="label -> lambda map: unconstrained MLP or the structured "
+                         "product f(p) * g(c); product adds _product to the tag")
     ap.add_argument("--noise-rank", type=int, default=50,
                     help="rank of the correlated-noise part of the noise model")
     ap.add_argument("--noise-max-rows", type=int, default=150_000,
@@ -290,7 +293,8 @@ def main() -> int:
         tag = (f"d{d}_a{a:g}_b{b:g}_K{K}_seed{seed}" + ("" if sub == "free" else f"_{sub}")
                + (f"_{bname}" if named else "")
                + ("" if head == ("linear", "square", "abs", "tanh") else f"_head-{'-'.join(head)}")
-               + ("_Arandom" if args.axes_init == "random" and sub == "fixed" else ""))
+               + ("_Arandom" if args.axes_init == "random" and sub == "fixed" else "")
+               + ("_product" if args.label_model == "product" else ""))
         # re-read each time: cheap, and means a cell finished by any earlier
         # or concurrent process is never repeated
         if queue is not None:
@@ -315,7 +319,7 @@ def main() -> int:
                           eval_every=args.eval_every, patience=args.patience,
                           min_epochs=args.min_epochs,
                           select_on=args.select_on, subspace=sub, basis=head,
-                          axes_init=args.axes_init)
+                          axes_init=args.axes_init, label_model=args.label_model)
         snaps: dict[int, np.ndarray] = {}
         model, hist = fit(config=cfg, train_rows=~val, val_rows=val,
                           is_real=is_real, synth_level=synth_level,
@@ -350,6 +354,7 @@ def main() -> int:
         fa["synth_level"] = synth_level
         row = {"tag": tag, "d": d, "alpha": a, "beta": b, "K": K, "seed": seed,
                "subspace": sub, "head_basis": ",".join(head), "basis": (bname if named else ("V" if sub != "free" else "")),
+               "label_model": args.label_model,
                "epochs_run": len(hist), "seconds": round(time.time()-t, 1)}
         for name, rows_ in (("train", np.nonzero(~val)[0]), ("val", np.nonzero(val)[0])):
             m = score(fa, rows_, X_t, col_t, w_t)

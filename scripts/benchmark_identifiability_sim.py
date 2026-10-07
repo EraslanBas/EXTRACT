@@ -28,6 +28,7 @@ Methods (all scored against B_true)
 -----------------------------------
 EXTRACT fixed   the default model: V from the training rows, B = A V.
 EXTRACT free    B learned directly; alpha = c / mean(x^2), c in --alphas.
+EXTRACT product fixed mode with lambda_k(p, c) = f_k(p) g_k(c) (--product).
 V (frozen)      the label-driven subspace with its initial axes, no training.
 PCA, FastICA    scikit-learn on training full-data rows (ICA: 3 seeds).
 null            mean MCC of 50 random rotations of the PCA basis.
@@ -204,6 +205,11 @@ def run_condition(family, structure, a):
     fixed_r = [run_fit(a, X, pi, ci, st, nc, tr, va, s, subspace="fixed", axes_init="random")
                for s in a.seeds]
     res["extract_fixed_Arandom"] = summarise(B, fixed_r)
+    if a.product:
+        for init in ("identity", "random"):
+            res[f"extract_fixed_product{'_Arandom' if init == 'random' else ''}"] = summarise(
+                B, [run_fit(a, X, pi, ci, st, nc, tr, va, s, subspace="fixed", axes_init=init,
+                            label_model="product") for s in a.seeds])
     V = fixed[0][0].subspace_basis_
     res["V_frozen_axes"] = {"mcc": round(mcc(B, V), 3), "overlap": round(subspace_overlap(B, V), 3)}
     ms = float(np.mean(X[tr] ** 2))
@@ -256,6 +262,9 @@ def main():
     ap.add_argument("--epochs", type=int, default=150)
     ap.add_argument("--free", action=argparse.BooleanOptionalAction, default=True,
                     help="also fit the free model")
+    ap.add_argument("--product", action=argparse.BooleanOptionalAction, default=False,
+                    help="also fit fixed mode with the structured product label model "
+                         "(identity and random A)")
     ap.add_argument("--eval-every", type=int, default=5)
     ap.add_argument("--threads", type=int, default=4)
     a = ap.parse_args()
