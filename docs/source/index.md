@@ -15,9 +15,11 @@ Each data point is one perturbation in one context: the change in expression of
 every gene, compared with unperturbed control cells from the same context, as a
 log-fold change. Every perturbation is evaluated several times in the same
 screen: once from all its cells, and again from random subsets of its cells.
-These repeated estimates show how much the logFC readout depends on which cells
-happened to be measured (differences between individual cells) and on how many
-cells were measured.
+These repeated estimates measure the sampling noise of each logFC: how much the
+estimate would change if a different sample of cells had been measured. They
+also show how the precision of the estimate depends on the number of data
+points behind it, here the number of cells: the fewer the cells, the noisier the
+logFC.
 
 Assessing this noise within each perturbation matters because a perturbation's
 logFC is an estimate, not an exact value. Perturbations differ widely in how many
