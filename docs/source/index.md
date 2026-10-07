@@ -173,9 +173,8 @@ automatically (`extract.data.noise`); a precomputed basis can also be passed in.
 
 ## Architecture
 
-There are three learned parts and no encoder: the axes $\mathbf A$ that make the
-loadings $\mathbf B = \mathbf A\mathbf V$, a label network, and a per-component head
-(`extract.train.Extract`).
+There are three learned parts and no encoder: the loadings $\mathbf B$, a
+label network, and a per-component head (`extract.train.Extract`).
 
 ```{raw} html
 <div class="ex-figure">
@@ -208,7 +207,7 @@ loadings $\mathbf B = \mathbf A\mathbf V$, a label network, and a per-component 
   <path class="ln" d="M688 62 H704" marker-end="url(#a)"/>
   <rect class="boxB" x="310" y="150" width="140" height="52" rx="4"/>
   <text x="380" y="173" text-anchor="middle" font-size="14" font-weight="600">B</text>
-  <text x="380" y="191" text-anchor="middle" class="sub">B = A V · A learned</text>
+  <text x="380" y="191" text-anchor="middle" class="sub">d × G · learned</text>
   <path class="lnB" d="M380 150 V90" marker-end="url(#aB)"/>
   <text x="388" y="124" class="sub">B⁺ = Bᵀ(BBᵀ+εI)⁻¹</text>
   <rect class="box" x="150" y="150" width="130" height="52" rx="4"/>
@@ -236,16 +235,13 @@ loadings $\mathbf B = \mathbf A\mathbf V$, a label network, and a per-component 
   <path class="ln" d="M737 88 V148" marker-end="url(#a)"/>
 </svg>
 </div>
-<p class="ex-caption">One forward pass. Blue marks B = A V and the two maps derived from it; red marks the loss terms. V is fixed, so the reconstruction branch is constant during training and only reported; the label u reaches the score only through λ, which multiplies per-factor statistics before the sum.</p>
+<p class="ex-caption">One forward pass. Blue marks B and the two maps derived from it; red marks the loss terms. The label u reaches the score only through λ, which multiplies per-factor statistics before the sum.</p>
 ```
 
 ### Loadings: one map, no encoder
 
-$\mathbf B = \mathbf A\mathbf V$ has shape $d \times G$: $\mathbf V$ is fixed and only
-the $d \times d$ matrix $\mathbf A$ is learned, starting from the identity.
-$\mathbf A$ is any invertible matrix, not just a rotation, so the programs can be
-oblique: correlated with each other and overlapping in genes. Factor activations
-are not predicted by a network; they are the least-squares coordinates of
+$\mathbf B$ is a single parameter of shape $d \times G$. Factor activations are
+not predicted by a network; they are the least-squares coordinates of
 $\mathbf x$ in $\mathbf B$'s row space:
 
 $$
@@ -257,7 +253,8 @@ maps that can disagree about what factor $k$ means, and encoder weights are
 filters, not patterns (Haufe et al. 2014): a gene can get a large weight
 precisely to cancel it. Deriving the projection from $\mathbf B$ makes
 $\mathbf B$ a pattern by construction. The ridge $\varepsilon = 10^{-4}$ keeps
-the Gram matrix well conditioned.
+the Gram matrix invertible while rows of $\mathbf B$ are near-collinear early
+in training.
 
 **Masked projection.** With one excluded column per row, that row's Gram matrix
 is $\mathbf G - \mathbf b\mathbf b^\top$, where $\mathbf b$ is $\mathbf B$'s
