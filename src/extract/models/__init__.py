@@ -6,7 +6,7 @@ masked least-squares projection of ``x`` onto ``B``'s row space, derived from
 """
 
 from .heads import BASIS_FUNCTIONS, DEFAULT_BASIS, PerComponentHead, UnconstrainedHead
-from .label_net import FactorizedLabelNet, ProductLabelNet
+from .label_net import AMMILabelNet, FactorizedLabelNet, ProductLabelNet
 from .loadings import NO_MASK, FixedBasisLoadings, GlobalLoadings
 
 __all__ = [
@@ -17,6 +17,7 @@ __all__ = [
     "UnconstrainedHead",
     "FactorizedLabelNet",
     "ProductLabelNet",
+    "AMMILabelNet",
     "BASIS_FUNCTIONS",
     "DEFAULT_BASIS",
 ]

@@ -58,9 +58,9 @@ def build_argparser() -> argparse.ArgumentParser:
                    help="default: every context in the split")
 
     g = p.add_argument_group("model")
-    g.add_argument("--label-model", default="mlp", choices=["mlp", "product"],
+    g.add_argument("--label-model", default="mlp", choices=["mlp", "product", "ammi"],
                    help="label -> lambda map: unconstrained MLP (default) or the structured "
-                        "product lambda_k(p, c) = f_k(p) g_k(c), which fixes the axes")
+                        "product lambda_k(p, c) = f_k(p) g_k(c), or ammi a_k(p) + b_k(c) + f_k(p) g_k(c)")
     g.add_argument("--subspace", default="fixed", choices=["fixed", "free", "anchored"],
                    help="fixed (default): B = A V, V the label-driven subspace computed "
                         "from the training rows, only A learned; free: B learned "
@@ -130,7 +130,7 @@ def main() -> None:
     out_dir.mkdir(parents=True, exist_ok=True)
     tag = (f"d{args.n_factors}_a{args.alpha:g}_b{args.beta:g}"
            f"_K{args.n_subsamples}_seed{args.seed}_{args.subspace}"
-           + ("_product" if args.label_model == "product" else ""))
+           + ("" if args.label_model == "mlp" else f"_{args.label_model}"))
 
     # ---- train/val partition only ---------------------------------------
     t0 = time.time()

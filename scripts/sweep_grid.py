@@ -184,9 +184,10 @@ def main() -> int:
     ap.add_argument("--axes-init", default="identity", choices=["identity", "random"],
                     help="fixed mode: start A at the identity or at a random rotation "
                          "(per seed); random adds _Arandom to the tag")
-    ap.add_argument("--label-model", default="mlp", choices=["mlp", "product"],
-                    help="label -> lambda map: unconstrained MLP or the structured "
-                         "product f(p) * g(c); product adds _product to the tag")
+    ap.add_argument("--label-model", default="mlp", choices=["mlp", "product", "ammi"],
+                    help="label -> lambda map: unconstrained MLP, the structured "
+                         "product f(p) * g(c), or ammi a(p) + b(c) + f(p) * g(c); "
+                         "non-mlp adds _<label-model> to the tag")
     ap.add_argument("--noise-rank", type=int, default=50,
                     help="rank of the correlated-noise part of the noise model")
     ap.add_argument("--noise-max-rows", type=int, default=150_000,
@@ -294,7 +295,7 @@ def main() -> int:
                + (f"_{bname}" if named else "")
                + ("" if head == ("linear", "square", "abs", "tanh") else f"_head-{'-'.join(head)}")
                + ("_Arandom" if args.axes_init == "random" and sub == "fixed" else "")
-               + ("_product" if args.label_model == "product" else ""))
+               + ("" if args.label_model == "mlp" else f"_{args.label_model}"))
         # re-read each time: cheap, and means a cell finished by any earlier
         # or concurrent process is never repeated
         if queue is not None:

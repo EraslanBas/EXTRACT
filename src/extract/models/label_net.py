@@ -100,3 +100,31 @@ class ProductLabelNet(nn.Module):
     ) -> torch.Tensor:
         lam = self.f(perturbation_idx) * self.g(context_idx)
         return lam.view(-1, self.n_factors, self.n_basis)
+
+
+class AMMILabelNet(ProductLabelNet):
+    """Main effects plus one multiplicative interaction per factor:
+    ``lambda_kj(p, c) = a_kj(p) + b_kj(c) + f_kj(p) * g_kj(c)``.
+
+    The AMMI model of genotype x environment analysis. The additive part is
+    preserved by any mixing of the factors, so it carries no information about
+    the axes; the interaction ``f * g`` does, exactly as in
+    :class:`ProductLabelNet`. Removing each factor's perturbation and context
+    averages leaves a rank-one table on the true axes and a higher-rank one on
+    mixed axes. The axes are therefore fixed only as strongly as the
+    interactions are.
+    """
+
+    def __init__(self, n_perturbations: int, n_contexts: int, n_factors: int, n_basis: int):
+        super().__init__(n_perturbations, n_contexts, n_factors, n_basis)
+        self.a = nn.Embedding(n_perturbations, n_factors * n_basis)
+        self.b = nn.Embedding(n_contexts, n_factors * n_basis)
+        nn.init.normal_(self.a.weight, std=0.02)
+        nn.init.normal_(self.b.weight, std=0.02)
+
+    def forward(
+        self, perturbation_idx: torch.Tensor, context_idx: torch.Tensor
+    ) -> torch.Tensor:
+        lam = (self.a(perturbation_idx) + self.b(context_idx)
+               + self.f(perturbation_idx) * self.g(context_idx))
+        return lam.view(-1, self.n_factors, self.n_basis)

@@ -15,6 +15,9 @@ a_p      perturbation engagement P x D [200 x 6]: nonzero with probability
          --active-frac [0.5], Laplace (unit variance) or Gaussian.
 s_pc     C contexts [6]. additive: a_p + 0.5 g_c + 0.3 d_pc;
          multiplicative: a_p * m_c + 0.3 d_pc, m_ck ~ LogNormal(0, 0.7).
+         ammi: a_p + 0.5 g_c + --interaction [1] * f_p * h_c + 0.3 d_pc, main
+         effects plus a per-program interaction; f_p has a_p's sparsity
+         pattern, h_ck ~ N(0, 1).
 rows     x = amp * s_pc @ B_true + noise; cells n ~ LogNormal(log 300, 0.7) in
          [80, 3000]; full-data row noise has covariance Sigma_cell / n; K [4]
          subsample rows of sizes m in [50, n) add independent noise with
@@ -28,7 +31,8 @@ Methods (all scored against B_true)
 -----------------------------------
 EXTRACT fixed   the default model: V from the training rows, B = A V.
 EXTRACT free    B learned directly; alpha = c / mean(x^2), c in --alphas.
-EXTRACT product fixed mode with lambda_k(p, c) = f_k(p) g_k(c) (--product).
+EXTRACT <lm>    fixed mode with a structured label model, lm in --label-models:
+                product lambda_k = f_k(p) g_k(c); ammi a_k(p) + b_k(c) + f_k(p) g_k(c).
 V (frozen)      the label-driven subspace with its initial axes, no training.
 PCA, FastICA    scikit-learn on training full-data rows (ICA: 3 seeds).
 null            mean MCC of 50 random rotations of the PCA basis.
@@ -110,6 +114,10 @@ def simulate(family, structure, seed, a):
         S = act[:, None, :] + 0.5 * draw(rng, family, (C, D))[None, :, :]
     elif structure == "multiplicative":
         S = act[:, None, :] * np.exp(rng.normal(0, 0.7, (C, D)))[None, :, :]
+    elif structure == "ammi":
+        f = draw(rng, family, (P, D)) * (act != 0)
+        S = (act[:, None, :] + 0.5 * draw(rng, family, (C, D))[None, :, :]
+             + a.interaction * f[:, None, :] * rng.normal(size=(C, D))[None, :, :])
     else:
         raise ValueError(structure)
     S = S + 0.3 * draw(rng, family, (P, C, D))
@@ -205,11 +213,11 @@ def run_condition(family, structure, a):
     fixed_r = [run_fit(a, X, pi, ci, st, nc, tr, va, s, subspace="fixed", axes_init="random")
                for s in a.seeds]
     res["extract_fixed_Arandom"] = summarise(B, fixed_r)
-    if a.product:
+    for lm in a.label_models:
         for init in ("identity", "random"):
-            res[f"extract_fixed_product{'_Arandom' if init == 'random' else ''}"] = summarise(
+            res[f"extract_fixed_{lm}{'_Arandom' if init == 'random' else ''}"] = summarise(
                 B, [run_fit(a, X, pi, ci, st, nc, tr, va, s, subspace="fixed", axes_init=init,
-                            label_model="product") for s in a.seeds])
+                            label_model=lm) for s in a.seeds])
     V = fixed[0][0].subspace_basis_
     res["V_frozen_axes"] = {"mcc": round(mcc(B, V), 3), "overlap": round(subspace_overlap(B, V), 3)}
     ms = float(np.mean(X[tr] ** 2))
@@ -240,7 +248,8 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--out", default="sim_bench")
     ap.add_argument("--families", nargs="+", default=["laplace", "gaussian"])
-    ap.add_argument("--structures", nargs="+", default=["additive", "multiplicative"])
+    ap.add_argument("--structures", nargs="+", default=["additive", "multiplicative"],
+                    choices=["additive", "multiplicative", "ammi"])
     ap.add_argument("--noise", choices=["isotropic", "realistic"], default="isotropic")
     ap.add_argument("--gene-sd-spread", type=float, default=1.0)
     ap.add_argument("--shared-noise", type=int, default=3)
@@ -262,9 +271,13 @@ def main():
     ap.add_argument("--epochs", type=int, default=150)
     ap.add_argument("--free", action=argparse.BooleanOptionalAction, default=True,
                     help="also fit the free model")
-    ap.add_argument("--product", action=argparse.BooleanOptionalAction, default=False,
-                    help="also fit fixed mode with the structured product label model "
+    ap.add_argument("--label-models", nargs="*", default=[], choices=["product", "ammi"],
+                    help="also fit fixed mode with these structured label models "
                          "(identity and random A)")
+    ap.add_argument("--product", dest="label_models", action="store_const", const=["product"],
+                    help="shorthand for --label-models product")
+    ap.add_argument("--interaction", type=float, default=1.0,
+                    help="ammi structure: scale of the interaction f_p * h_c")
     ap.add_argument("--eval-every", type=int, default=5)
     ap.add_argument("--threads", type=int, default=4)
     a = ap.parse_args()
@@ -284,6 +297,10 @@ def main():
             r = run_condition(family, structure, a)
             show(r); results.append(r)
     tag = f"{a.noise}_amp{a.amp:g}_active{a.active_frac:g}_corr{a.program_corr:g}_{'-'.join(a.families)}"
+    if a.structures != ["additive", "multiplicative"]:
+        tag += f"_{'-'.join(a.structures)}" + (f"_int{a.interaction:g}" if "ammi" in a.structures else "")
+    if a.label_models:
+        tag += f"_lm-{'-'.join(a.label_models)}"
     (out / f"bench_{tag}.json").write_text(json.dumps({"settings": vars(a), "results": results}, indent=1))
     print(f"\nwrote {out / f'bench_{tag}.json'}")
 

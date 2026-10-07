@@ -10,7 +10,7 @@ import torch
 from extract.data.ontarget import mask_coverage, on_target_index
 from extract.evaluation import span_residual
 from extract.models import NO_MASK, GlobalLoadings, PerComponentHead
-from extract.models.label_net import FactorizedLabelNet, ProductLabelNet
+from extract.models.label_net import AMMILabelNet, FactorizedLabelNet, ProductLabelNet
 from extract.objectives import (
     DEFAULT_WEIGHTS,
     StratifiedNegativeSampler,
@@ -184,12 +184,28 @@ def test_product_label_net_is_a_per_factor_product():
     assert torch.allclose(lam[0] * lam[3], lam[1] * lam[2], atol=1e-5)
 
 
-def test_fit_runs_with_the_product_label_model():
+def test_ammi_label_net_interaction_is_rank_one_after_removing_main_effects():
+    torch.manual_seed(0)
+    net = AMMILabelNet(7, 4, 3, 2)
+    with torch.no_grad():
+        for e in (net.a, net.b, net.f, net.g):
+            e.weight.normal_()
+    p, c = torch.meshgrid(torch.arange(7), torch.arange(4), indexing="ij")
+    lam = net(p.reshape(-1), c.reshape(-1)).view(7, 4, 3, 2)
+    T = lam[..., 0, 0]
+    T = T - T.mean(0, keepdim=True) - T.mean(1, keepdim=True) + T.mean()
+    s = torch.linalg.svdvals(T)
+    assert s[1] < 1e-4 * s[0]
+
+
+@pytest.mark.parametrize("label_model", ["product", "ammi"])
+def test_fit_runs_with_a_structured_label_model(label_model):
     X, p, c, s, n = _toy_dataset()
     cfg = TrainConfig(n_factors=5, epochs=6, batch_size=64, log_every=0, seed=0,
-                      label_model="product", noise_rank=3)
+                      label_model=label_model, noise_rank=3)
     model, history = fit(X, p, c, s, n, target_col=None, config=cfg)
     assert isinstance(model.label_net, ProductLabelNet)
+    assert isinstance(model.label_net, AMMILabelNet) == (label_model == "ammi")
     assert history[-1]["disc"] < history[0]["disc"]
 
 

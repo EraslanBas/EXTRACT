@@ -19,7 +19,7 @@ import torch.nn.functional as F
 from torch import nn
 
 from .data.ontarget import on_target_index
-from .models import (FactorizedLabelNet, ProductLabelNet, FixedBasisLoadings, GlobalLoadings,
+from .models import (AMMILabelNet, FactorizedLabelNet, ProductLabelNet, FixedBasisLoadings, GlobalLoadings,
                      PerComponentHead, UnconstrainedHead)
 from .models.heads import DEFAULT_BASIS
 from .models.loadings import NO_MASK
@@ -121,7 +121,9 @@ class TrainConfig:
     #: How labels map to the head's coefficients lambda. ``"mlp"``: embeddings
     #: of p and c through an MLP, unconstrained (does not fix the axes).
     #: ``"product"``: lambda_k(p, c) = f_k(p) * g_k(c), a CP structure that
-    #: does. See models.label_net.ProductLabelNet.
+    #: does. ``"ammi"``: lambda_k(p, c) = a_k(p) + b_k(c) + f_k(p) * g_k(c),
+    #: main effects plus that interaction; the axes are fixed by the
+    #: interaction alone. See models.label_net.
     label_model: str = "mlp"
 
     #: Ablation only: replaces the per-component head with an MLP, which
@@ -204,8 +206,9 @@ class Extract(nn.Module):
             if config.unconstrained_head
             else PerComponentHead(config.basis)
         )
-        if config.label_model == "product":
-            self.label_net = ProductLabelNet(n_perturbations, n_contexts,
+        if config.label_model in ("product", "ammi"):
+            net = ProductLabelNet if config.label_model == "product" else AMMILabelNet
+            self.label_net = net(n_perturbations, n_contexts,
                                              config.n_factors, len(config.basis))
         elif config.label_model == "mlp":
             self.label_net = FactorizedLabelNet(
@@ -217,7 +220,7 @@ class Extract(nn.Module):
                 hidden=config.label_hidden,
             )
         else:
-            raise ValueError(f"label_model must be 'mlp' or 'product', got {config.label_model!r}")
+            raise ValueError(f"label_model must be 'mlp', 'product' or 'ammi', got {config.label_model!r}")
 
     # ---- forward pieces ---------------------------------------------------
 
