@@ -332,7 +332,7 @@ loadings $\mathbf B = \mathbf A\mathbf V$, a label network, and a per-component 
   <text x="380" y="77" text-anchor="middle" class="sub">Sherman–Morrison · d</text>
   <rect class="box" x="480" y="36" width="140" height="52" rx="4"/>
   <text x="550" y="59" text-anchor="middle" font-size="13.5">q<tspan font-size="10" dy="3">j</tspan><tspan dy="-3">(z</tspan><tspan font-size="10" dy="3">k</tspan><tspan dy="-3">)</tspan></text>
-  <text x="550" y="77" text-anchor="middle" class="sub">4 statistics · d×4</text>
+  <text x="550" y="77" text-anchor="middle" class="sub">z, z², |z|, tanh z</text>
   <circle class="box" cx="668" cy="62" r="20"/>
   <text x="668" y="67" text-anchor="middle" font-size="15">Σ</text>
   <rect class="box" x="706" y="36" width="62" height="52" rx="4"/>
@@ -440,8 +440,8 @@ s(\mathbf x, u) \;=\; \sum_{k=1}^{d}\sum_{j=1}^{J} \lambda_{kj}(u)\, q_j(z_k) \;
 \Pr(\text{real} \mid \mathbf x, u) = \sigma\big(s(\mathbf x, u)\big)
 $$
 
-The basis $q$ is (linear, square, abs, tanh), applied coordinate-wise, so
-$J = 4$. No term ever multiplies $z_k$ by $z_{k'}$. The head's only learned
+The basis is $q(z) = (z,\ z^2,\ |z|,\ \tanh z)$, applied to each factor
+separately, so $J = 4$ statistics per factor ($d \times 4$ per response). No term ever multiplies $z_k$ by $z_{k'}$. The head's only learned
 parameter is the bias $b$; all flexibility sits in $\boldsymbol\lambda(u)$,
 and in $\mathbf z$ through $\mathbf B$.
 
