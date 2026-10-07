@@ -117,24 +117,47 @@ once, before training, from the measured rows of the training pairs. The aim is
 simple: keep the directions where responses differ **because of the
 perturbation**, not because of measurement noise.
 
-**Measuring the noise.** Every perturbation is measured twice in the same
-screen: on all its cells (the full-data row) and on random subsets of those
-cells (the subsample rows). Both estimate the same response, so the difference
-between a subsample and its full-data row is pure measurement noise. These
-differences tell us how large the noise is in every direction of gene space.
+Nothing is done to the data values: no row is shrunk or denoised, and the
+rows enter the model exactly as `ashr` produced them. The noise estimate only
+decides **which directions** of gene space count as important. It works with
+the variance of the rows along each direction.
 
-**Keeping signal, not noise.** The full-data rows show how responses vary in
-total. Subtracting the expected noise leaves the variation due to the
-perturbations. $\mathbf V$ is the $d$ directions with the most of that variation
-relative to the noise:
+**What a full-data row contains.** Each full-data row is the true response plus
+measurement noise. Along any direction (a weighted combination of genes) the
+two add, because they are independent:
 
 $$
-\mathbf V = \text{the top } d \text{ directions maximising }
-\frac{\text{perturbation-driven variation}}{\text{measurement noise}} .
+\text{variance along a direction} \;=\; \text{signal variance} \;+\; \text{noise variance}.
 $$
 
-Noise that is shared across many genes (for example a cell-quality axis) counts
-as noise; each gene's own scale is left untouched.
+The left side is measured directly from the full-data rows. PCA ranks
+directions by it, mixing the two.
+
+**Measuring the noise in each direction.** Every perturbation is also measured
+on random subsets of its cells (the subsample rows). A subsample and its
+full-data row share the same true response, so their difference contains no
+signal, only noise. How much these differences vary along a direction gives the
+noise variance in that direction. Noise variance scales as one over the number
+of cells, so the differences are rescaled to the noise level of a full-data
+row.
+
+**Subtracting it.** For every direction,
+signal variance = total variance (full-data rows) − noise variance (subsample
+differences). This is done for all directions at once with covariance
+matrices. $\mathbf V$ is the $d$ directions with the largest ratio of signal
+variance to noise variance. Noise shared across many genes (for example a
+cell-quality axis) counts as noise; each gene's own scale is left untouched.
+
+For example, if direction A has total variance 10 of which 8 is noise, and
+direction B has total variance 6 of which 1 is noise:
+
+| direction | total variance | noise | signal | signal ÷ noise |
+|---|---|---|---|---|
+| A | 10 | 8 | 2 | 0.25 |
+| B | 6 | 1 | 5 | 5 |
+
+PCA prefers A, because it varies more; $\mathbf V$ prefers B, because its
+variation is mostly perturbation-driven.
 
 | | picks directions by | uses the subsamples |
 |---|---|---|
