@@ -4,8 +4,8 @@
 via **T**ensors.
 
 EXTRACT finds the gene programs behind a perturbation screen that was run in
-several contexts (for example, the same CRISPR perturbations under different
-drugs). It learns a small set of programs, groups of genes that move together,
+several contexts (for example, the same drugs or CRISPR perturbations in different
+cell types). It learns a small set of programs, groups of genes that move together,
 shared by the whole screen, and tells you how strongly each perturbation
 engages each program in each context.
 
