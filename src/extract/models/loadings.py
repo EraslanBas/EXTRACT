@@ -243,14 +243,24 @@ class FixedBasisLoadings(GlobalLoadings):
     Every method of :class:`GlobalLoadings` works unchanged through ``B``.
     """
 
-    def __init__(self, V: np.ndarray, ridge: float = 1e-4, learn_axes: bool = True):
+    def __init__(self, V: np.ndarray, ridge: float = 1e-4, learn_axes: bool = True,
+                 axes_init: str = "identity", seed: int = 0):
         nn.Module.__init__(self)
         V = torch.as_tensor(np.asarray(V), dtype=torch.float32)
         self.n_factors, self.n_genes = V.shape
         self.ridge = ridge
         self.register_buffer("V", V)
+        if axes_init == "identity":
+            A0 = torch.eye(self.n_factors)
+        elif axes_init == "random":
+            # a random rotation of V's axes, different for every seed, so that
+            # cross-seed agreement cannot come from a shared starting point
+            Q, _ = np.linalg.qr(np.random.default_rng(seed).normal(size=(self.n_factors,) * 2))
+            A0 = torch.as_tensor(Q, dtype=torch.float32)
+        else:
+            raise ValueError(f"axes_init must be 'identity' or 'random', got {axes_init!r}")
         if learn_axes:
-            self.A = nn.Parameter(torch.eye(self.n_factors))
+            self.A = nn.Parameter(A0)
         else:                     # "frozen": B = V exactly, a probe of V's axes
             self.register_buffer("A", torch.eye(self.n_factors))
 

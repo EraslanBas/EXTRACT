@@ -140,3 +140,16 @@ def test_frozen_basis_learns_nothing_in_B():
     model, _ = fit(X, p, c, s, n, config=cfg, train_rows=~val, val_rows=val, subspace_basis=V)
     assert np.allclose(model.loading_matrix(), V)
     assert "loadings.A" not in dict(model.named_parameters())
+
+
+def test_random_axes_init_differs_by_seed_and_keeps_the_span():
+    rng = np.random.default_rng(4)
+    V = rng.normal(size=(4, 30)).astype(np.float32)
+    a = FixedBasisLoadings(V, axes_init="random", seed=0)
+    b = FixedBasisLoadings(V, axes_init="random", seed=1)
+    assert not torch.allclose(a.A, b.A)
+    A = a.A.detach().numpy()
+    assert np.allclose(A @ A.T, np.eye(4), atol=1e-5)          # a rotation
+    Qb, _ = np.linalg.qr(a.B.detach().numpy().T); Qv, _ = np.linalg.qr(V.T)
+    assert np.linalg.svd(Qb.T @ Qv, compute_uv=False).min() > 0.999
+    assert torch.allclose(FixedBasisLoadings(V).A, torch.eye(4))  # default unchanged

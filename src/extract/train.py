@@ -114,6 +114,10 @@ class TrainConfig:
     noise_rank: int = 50
     noise_max_rows: int = 150_000
 
+    #: Starting axes A in the fixed model: ``"identity"`` (B starts at V) or
+    #: ``"random"`` (a random rotation of V's axes, drawn from ``seed``).
+    axes_init: str = "identity"
+
     #: Ablation only: replaces the per-component head with an MLP, which
     #: destroys identifiability. See models.heads.UnconstrainedHead.
     unconstrained_head: bool = False
@@ -179,7 +183,8 @@ class Extract(nn.Module):
             raise ValueError(f"subspace_basis must be [{config.n_factors}, {n_genes}]")
         if config.subspace in ("fixed", "frozen"):
             self.loadings = FixedBasisLoadings(subspace_basis, ridge=config.ridge,
-                                               learn_axes=config.subspace == "fixed")
+                                               learn_axes=config.subspace == "fixed",
+                                               axes_init=config.axes_init, seed=config.seed)
         else:
             self.loadings = GlobalLoadings(config.n_factors, n_genes, ridge=config.ridge)
             if config.subspace == "anchored":

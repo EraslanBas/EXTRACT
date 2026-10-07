@@ -181,6 +181,9 @@ def main() -> int:
                     help="statistics the head applies to each factor, one comma-"
                          "separated set per grid value, e.g. abs  linear,abs. "
                          "Non-default sets add _head-<names> to the tag")
+    ap.add_argument("--axes-init", default="identity", choices=["identity", "random"],
+                    help="fixed mode: start A at the identity or at a random rotation "
+                         "(per seed); random adds _Arandom to the tag")
     ap.add_argument("--noise-rank", type=int, default=50,
                     help="rank of the correlated-noise part of the noise model")
     ap.add_argument("--noise-max-rows", type=int, default=150_000,
@@ -286,7 +289,8 @@ def main() -> int:
         use_ext = named and ext_bases[bname] is not None
         tag = (f"d{d}_a{a:g}_b{b:g}_K{K}_seed{seed}" + ("" if sub == "free" else f"_{sub}")
                + (f"_{bname}" if named else "")
-               + ("" if head == ("linear", "square", "abs", "tanh") else f"_head-{'-'.join(head)}"))
+               + ("" if head == ("linear", "square", "abs", "tanh") else f"_head-{'-'.join(head)}")
+               + ("_Arandom" if args.axes_init == "random" and sub == "fixed" else ""))
         # re-read each time: cheap, and means a cell finished by any earlier
         # or concurrent process is never repeated
         if queue is not None:
@@ -310,7 +314,8 @@ def main() -> int:
                           device=args.device, log_every=0,
                           eval_every=args.eval_every, patience=args.patience,
                           min_epochs=args.min_epochs,
-                          select_on=args.select_on, subspace=sub, basis=head)
+                          select_on=args.select_on, subspace=sub, basis=head,
+                          axes_init=args.axes_init)
         snaps: dict[int, np.ndarray] = {}
         model, hist = fit(config=cfg, train_rows=~val, val_rows=val,
                           is_real=is_real, synth_level=synth_level,
