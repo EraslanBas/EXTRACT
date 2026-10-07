@@ -93,14 +93,26 @@ class TrainConfig:
     seed: int = 0
     device: str = "cpu"
 
-    #: How the span of B is set (needs ``subspace_basis`` in :func:`fit`):
-    #: ``"free"`` -- learned, as always; ``"fixed"`` -- B = A V with V fixed and
-    #: only A learned, so the discriminator picks oblique axes inside span(V);
-    #: ``"anchored"`` -- B free, initialised at V, with reconstruction measured
-    #: in the correlated-noise metric (needs ``noise_model``); ``"frozen"`` --
-    #: B = V exactly, nothing in it learned: a probe of how discriminative a
-    #: given set of axes (e.g. ICA's) is under the separable head.
-    subspace: str = "free"
+    #: How the span of B is set.
+    #:
+    #: ``"fixed"`` (the model): B = A V. ``V`` [d, G] is the label-driven
+    #: subspace -- the d directions with the most perturbation-driven variation
+    #: per unit of estimation noise, computed once from the training rows
+    #: (:mod:`extract.data.noise`) -- and only the d x d matrix ``A`` is learned,
+    #: so the discriminator chooses oblique axes inside span(V). The span, and
+    #: with it the reconstruction, cannot move, so ``alpha`` and
+    #: ``recon_fake_weight`` have no effect.
+    #:
+    #: ``"free"``: B learned directly by both terms (the earlier model; an
+    #: ablation). Experimental: ``"anchored"`` (B initialised at V,
+    #: reconstruction in the correlated-noise metric) and ``"frozen"`` (B = V
+    #: exactly, a probe of a given set of axes).
+    subspace: str = "fixed"
+
+    #: Rank of the correlated part of the noise model behind ``V``, and the
+    #: number of subsample residuals used to fit it.
+    noise_rank: int = 50
+    noise_max_rows: int = 150_000
 
     #: Ablation only: replaces the per-component head with an MLP, which
     #: destroys identifiability. See models.heads.UnconstrainedHead.
@@ -355,6 +367,25 @@ def fit(
             f"{config.batch_size}"
         )
 
+    if config.subspace in ("fixed", "anchored") and subspace_basis is None:
+        # the label-driven subspace, from the measured TRAINING rows only.
+        # is_real is validated here as well, since it is read before the
+        # general check further down.
+        if is_real is not None:
+            if len(np.asarray(is_real)) != n_rows:
+                raise ValueError(f"is_real has {len(np.asarray(is_real))} entries, X has {n_rows} rows")
+            if not np.asarray(is_real, dtype=bool).any():
+                raise ValueError("no real rows: L_recon would have nothing to fit")
+        from .data.noise import label_subspace_from_rows
+        subspace_basis, nm = label_subspace_from_rows(
+            X, perturbation_idx, context_idx, stratum, n_cells, train_idx,
+            d=config.n_factors, rank=config.noise_rank,
+            max_rows=config.noise_max_rows, seed=config.seed, is_real=is_real)
+        noise_model = noise_model if noise_model is not None else nm
+        if config.log_every:
+            print(f"label-driven subspace: d={config.n_factors}, noise rank "
+                  f"{len(nm.s)}, from the training rows", flush=True)
+
     model = Extract(
         n_genes=n_genes,
         n_perturbations=n_perturbations,
@@ -363,6 +394,8 @@ def fit(
         subspace_basis=subspace_basis,
         noise_model=noise_model,
     ).to(device)
+    model.subspace_basis_ = subspace_basis
+    model.noise_model_ = noise_model
 
     weights = dict(config.negative_weights or DEFAULT_WEIGHTS)
 

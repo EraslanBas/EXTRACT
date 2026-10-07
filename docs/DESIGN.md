@@ -10,6 +10,8 @@ repository.
 | paper | code |
 |---|---|
 | §2 rows, Welch + `ashr` | `extract.de` (`ComputeSE.py`, `run_ashr_on_chunk.R`, `shards.py`, `matrices.py`) |
+| the label-driven subspace `V` (noise from subsamples, generalised eigenproblem) | `data.noise` (`subsample_residuals`, `noise_covariance`, `label_subspace`) |
+| `B = A V`, only `A` learned (the default model, `subspace="fixed"`) | `models.loadings.FixedBasisLoadings`, `train.TrainConfig.subspace` |
 | §3.1 eq. (2) the tied projection `z = x B⁺` | `models.loadings.GlobalLoadings.project` |
 | §3.2 eq. (3)–(5) masked projection, Sherman–Morrison | `models.loadings.GlobalLoadings.project`, `data.ontarget.on_target_index` |
 | §3.3 eq. (6)–(8) the per-component head | `models.heads.PerComponentHead` |
@@ -21,6 +23,7 @@ repository.
 | §7 reading `z`, sign anchoring | `interpret.loadings`, `interpret.effects` |
 | §8 eq. (14) the span test | `evaluation.span` |
 | Q4 cross-seed stability | `evaluation.stability` (Hungarian + MCC) |
+| held-out reconstruction, shared with baselines | `evaluation.reconstruction` |
 | the training loop, eq. (12) | `train.fit` |
 
 ## Deliberately absent

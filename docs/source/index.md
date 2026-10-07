@@ -7,9 +7,12 @@ EXTRACT is a contrastive, identifiable factor model for perturbation × context
 screens. The screen is a three-way array (perturbation × context × gene), and
 EXTRACT recovers the gene programs behind it: one matrix $\mathbf B$ that maps
 $d$ latent programs to genes, shared by every perturbation and every context.
-The programs are oriented by asking a deliberately restricted discriminator
-whether a response vector belongs to the (perturbation, context) label attached
-to it.
+It works in two stages. First it chooses the **subspace** the programs live in:
+the directions with the most perturbation-driven signal relative to measurement
+noise, measured from the screen's own subsampled replicates. Then it chooses the
+**axes** inside that subspace, the individual programs, by asking a deliberately
+restricted discriminator whether a response vector belongs to the
+(perturbation, context) label attached to it.
 
 ## What the model is
 
@@ -20,22 +23,43 @@ the rows are linear mixtures of $d$ latent programs, $\mathbf x \approx
 \mathbf z\mathbf B$, and wants the axes of $\mathbf z$ to be the true programs
 rather than an arbitrary rotation of them.
 
-Reconstruction alone cannot deliver that. A tied linear autoencoder recovers
-the top-$d$ principal subspace and leaves the orientation inside it free
-(Baldi & Hornik 1989). EXTRACT adds a second signal from nonlinear ICA with
-auxiliary variables (time-contrastive learning, Hyvärinen & Morioka 2016): the
-label $u = (p, c)$ is the auxiliary variable, and a discriminator that must
-separate real $(\mathbf x, u)$ pairs from label-permuted ones may only score
-each factor separately. That restriction is what breaks the rotation symmetry.
+Finding them is two separate problems: *which subspace* the programs span, and
+*which axes* inside it are the programs. Variance alone cannot answer either.
+The top-variance subspace mixes real perturbation effects with estimation noise
+from a finite number of cells, and any rotation of axes inside a subspace fits
+the data equally well. EXTRACT answers the two questions with two different
+pieces of information.
+
+1. **The subspace, from signal relative to noise.** Each perturbation is
+   measured on its full set of cells and on random subsets of them, so the
+   difference between a subsample and its full-data row is pure measurement
+   noise. From these differences EXTRACT estimates the noise, and keeps the $d$
+   directions with the most perturbation-driven variation per unit of noise:
+   the **label-driven subspace** $\mathbf V$ ($d \times G$), computed once from
+   the training rows before training.
+2. **The axes, from the labels.** The programs are $\mathbf B = \mathbf A\mathbf V$,
+   where only the $d \times d$ matrix $\mathbf A$ is learned. They are chosen by
+   a discriminator that must separate real $(\mathbf x, u)$ pairs, $u = (p, c)$,
+   from label-permuted ones and may only score each factor separately. That
+   restriction is what breaks the rotation symmetry (an idea from nonlinear ICA
+   with auxiliary variables: time-contrastive learning, Hyvärinen & Morioka 2016).
 
 $$
-\mathcal L \;=\; \mathcal L_{\text{disc}} \;+\; \alpha\,\mathcal L_{\text{recon}}
+\mathbf B = \mathbf A\,\mathbf V, \qquad \mathcal L = \mathcal L_{\text{disc}}
 \quad\big[\,+\;\lambda_{\text{tc}}\,\mathcal L_{\text{tc}}\,\big]
 $$
 
-$\mathcal L_{\text{disc}}$ picks the rotation; $\mathcal L_{\text{recon}}$
-picks the subspace. Everything else in the method exists to make those two
-terms measure biology rather than a shortcut.
+This is the structure of ICA (choose a subspace, then unmix inside it), with the
+two criteria replaced: signal-to-noise from the subsamples instead of variance,
+and label-based discrimination instead of non-Gaussianity. Because the subspace
+cannot move during training, the programs are pinned to directions that carry
+perturbation-driven signal, and the discriminator cannot drag them toward
+directions that separate training labels but are mostly noise.
+
+The earlier, one-stage version learns $\mathbf B$ directly with
+$\mathcal L = \mathcal L_{\text{disc}} + \alpha\,\mathcal L_{\text{recon}}$,
+reconstruction choosing the subspace and discrimination the axes; it remains
+available as `subspace="free"`.
 
 ## What a row is
 
@@ -86,10 +110,50 @@ controls or unmatched names), and that column is excluded from the projection,
 the reconstruction error and the span residual alike. A compound screen simply
 has no masked entry.
 
+## The label-driven subspace
+
+$\mathbf V$ is not learned by gradient descent. It is computed in closed form
+from the **measured rows of the training pairs** (no synthetic rows, no
+validation or test pairs, and no labels beyond grouping each subsample with its
+own pair) in four steps (`extract.data.noise`).
+
+1. **Noise from the subsamples.** A subsample and its pair's full-data row
+   estimate the same response from a random subset of the same cells, against
+   the same fixed controls, so their difference has covariance
+   $\big(1/n_{\text{sub}} - 1/n_{\text{full}}\big)\,\boldsymbol\Sigma_{\text{cell}}$.
+   Each difference, divided by $\sqrt{1/n_{\text{sub}} - 1/n_{\text{full}}}$, is a draw
+   with covariance $\boldsymbol\Sigma_{\text{cell}}$, the per-cell noise covariance
+   across genes. It is fitted as per-gene noise variances plus $r = 50$ shared
+   noise directions $\mathbf U$ with variances $\mathbf s$ (a principal-component
+   fit with a factor-analysis correction, so the per-gene part is not counted
+   twice).
+2. **Signal.** The second moment of the full-data rows minus the noise they
+   carry on average,
+   $\boldsymbol\Sigma_S = \mathbb E[\mathbf x^\top\mathbf x] - \boldsymbol\Sigma_{\text{cell}}\,\mathbb E[1/n]$.
+3. **A noise metric that keeps gene scales.**
+   $\mathbf M = c\,\mathbf I + \mathbf U\operatorname{diag}(\mathbf s)\mathbf U^\top$, with
+   $c$ the mean per-gene noise variance. It counts the shared noise directions
+   as noise but treats every gene's own scale equally: no per-gene rescaling.
+4. **Most signal per unit of noise.** Solve
+   $\boldsymbol\Sigma_S\,\mathbf v = \lambda\,\mathbf M\,\mathbf v$ by whitening with
+   $\mathbf M^{-1/2}$ and keep the top $d$ eigenvectors $\mathbf w$. The eigenvectors
+   are filters; the loading directions are the patterns $\mathbf M^{1/2}\mathbf w$,
+   scaled to unit length, which form the rows of $\mathbf V$ (in logFC units).
+
+| | chooses directions by | uses the subsamples |
+|---|---|---|
+| PCA | total variation (signal + noise) | no |
+| ICA | PCA's subspace, then independent axes inside it | no |
+| $\mathbf V$ | perturbation-driven variation relative to measured noise | yes |
+
+`fit()` computes $\mathbf V$ from its training rows automatically; a
+precomputed basis can also be passed in.
+
 ## Architecture
 
-There are three learned parts and no encoder: the loadings $\mathbf B$, a
-label network, and a per-component head (`extract.train.Extract`).
+There are three learned parts and no encoder: the axes $\mathbf A$ that make the
+loadings $\mathbf B = \mathbf A\mathbf V$, a label network, and a per-component head
+(`extract.train.Extract`).
 
 ```{raw} html
 <div class="ex-figure">
@@ -122,7 +186,7 @@ label network, and a per-component head (`extract.train.Extract`).
   <path class="ln" d="M688 62 H704" marker-end="url(#a)"/>
   <rect class="boxB" x="310" y="150" width="140" height="52" rx="4"/>
   <text x="380" y="173" text-anchor="middle" font-size="14" font-weight="600">B</text>
-  <text x="380" y="191" text-anchor="middle" class="sub">d × G · learned</text>
+  <text x="380" y="191" text-anchor="middle" class="sub">B = A V · A learned</text>
   <path class="lnB" d="M380 150 V90" marker-end="url(#aB)"/>
   <text x="388" y="124" class="sub">B⁺ = Bᵀ(BBᵀ+εI)⁻¹</text>
   <rect class="box" x="150" y="150" width="130" height="52" rx="4"/>
@@ -150,13 +214,16 @@ label network, and a per-component head (`extract.train.Extract`).
   <path class="ln" d="M737 88 V148" marker-end="url(#a)"/>
 </svg>
 </div>
-<p class="ex-caption">One forward pass. Blue marks B and the two maps derived from it; red marks the loss terms. The label u reaches the score only through λ, which multiplies per-factor statistics before the sum.</p>
+<p class="ex-caption">One forward pass. Blue marks B = A V and the two maps derived from it; red marks the loss terms. V is fixed, so the reconstruction branch is constant during training and only reported; the label u reaches the score only through λ, which multiplies per-factor statistics before the sum.</p>
 ```
 
 ### Loadings: one map, no encoder
 
-$\mathbf B$ is a single parameter of shape $d \times G$. Factor activations are
-not predicted by a network; they are the least-squares coordinates of
+$\mathbf B = \mathbf A\mathbf V$ has shape $d \times G$: $\mathbf V$ is fixed and only
+the $d \times d$ matrix $\mathbf A$ is learned, starting from the identity.
+$\mathbf A$ is any invertible matrix, not just a rotation, so the programs can be
+oblique: correlated with each other and overlapping in genes. Factor activations
+are not predicted by a network; they are the least-squares coordinates of
 $\mathbf x$ in $\mathbf B$'s row space:
 
 $$
@@ -168,8 +235,7 @@ maps that can disagree about what factor $k$ means, and encoder weights are
 filters, not patterns (Haufe et al. 2014): a gene can get a large weight
 precisely to cancel it. Deriving the projection from $\mathbf B$ makes
 $\mathbf B$ a pattern by construction. The ridge $\varepsilon = 10^{-4}$ keeps
-the Gram matrix invertible while rows of $\mathbf B$ are near-collinear early
-in training.
+the Gram matrix well conditioned.
 
 **Masked projection.** With one excluded column per row, that row's Gram matrix
 is $\mathbf G - \mathbf b\mathbf b^\top$, where $\mathbf b$ is $\mathbf B$'s
@@ -268,7 +334,15 @@ observed vector and swaps the label; whole rows move as units, so the marginal
 law of $\mathbf x$ is preserved exactly and the only way to win is to model how
 $\mathbf x$ depends on $u$.
 
-### Reconstruction fixes the subspace
+### Reconstruction
+
+With $\mathbf B = \mathbf A\mathbf V$ the span cannot move, and the projection onto a
+span does not depend on the axes chosen inside it, so every reconstruction
+error below is **constant during training**: the subspace was already chosen,
+by signal-to-noise, when $\mathbf V$ was computed. The term, and the weights
+$\alpha$ and $\beta$, act only in the one-stage `free` model, where
+reconstruction is what fixes the subspace. Reconstruction errors are still
+recorded for every model, as a diagnostic.
 
 A row carries two bits: whether $\mathbf x$ is a **measured** response and
 whether its label is **its own**. A **synthetic** row is a column-shuffled copy
@@ -352,7 +426,9 @@ With one context only the first strategy exists, and it suffices.
 
 `fit()` takes the rows, their integer-encoded perturbation and context, stratum,
 cell count, on-target column, an `is_real` flag and train/validation masks.
-Per batch:
+First, unless a basis is supplied, it computes the label-driven subspace
+$\mathbf V$ from the measured training rows and initialises $\mathbf A$ to the
+identity. Then, per batch:
 
 1. Draw training rows; the sampler returns a permuted label $(p^*, c^*)$ for
    each measured row.
@@ -362,14 +438,17 @@ Per batch:
    same $\mathbf z$ serves both.
 4. Compute $\mathcal L_{\text{disc}}$ and the signed, precision-weighted masked
    reconstruction.
-5. Step on $\mathcal L_{\text{disc}} + \alpha\,\mathcal L_{\text{recon}}$ with
-   Adam (learning rate $10^{-3}$, gradient-norm clip 5).
+5. Step on $\mathcal L_{\text{disc}}$ (plus $\alpha\,\mathcal L_{\text{recon}}$ in the
+   `free` model) with Adam (learning rate $10^{-3}$, gradient-norm clip 5),
+   updating $\mathbf A$, the label network and the head bias.
 6. If the independence term is on, step its discriminator on the detached
    $\mathbf z$.
 
 At regular intervals the validation rows are scored with a sampler built on
 validation rows, and train and validation discrimination and reconstruction are
-recorded per epoch. $\mathbf B$ can be snapshotted at every evaluation.
+recorded per epoch. $\mathbf B$ can be snapshotted at every evaluation. With only
+$\mathbf A$ and the label network learning, validation accuracy typically peaks
+within the first few dozen epochs.
 
 ## Splits and model selection
 
@@ -387,9 +466,11 @@ context: the model has to supply the interaction. Synthetic rows are made by
 shuffling each context's rows before the split, and each goes to the partition
 of the label it carries.
 
-**Hyperparameters.** $d$ (number of programs), $\alpha$ (reconstruction
-weight), $\beta$ (negative weight on synthetic rows) and $K$, the number of
-subsample rows per pair kept in training besides the full-data row. $K$ picks a
+**Hyperparameters.** $d$ (number of programs), $K$ (the number of subsample
+rows per pair kept in training besides the full-data row) and the rank $r$ of
+the shared noise behind $\mathbf V$. In the `free` model, $\alpha$
+(reconstruction weight) and $\beta$ (negative weight on synthetic rows) are
+tuned as well. $K$ picks a
 nested random subset fixed per pair ($K = 1 \subset K = 2 \subset \dots$), and
 thins training rows only, so every $K$ is scored on the same validation rows.
 
@@ -459,9 +540,11 @@ Defaults of `TrainConfig`:
 
 | Field | Default | Role |
 |---|---|---|
+| `subspace` | fixed | `fixed`: $\mathbf B = \mathbf A\mathbf V$, only $\mathbf A$ learned; `free`: $\mathbf B$ learned directly (the one-stage model) |
 | `n_factors` | 24 | $d$ |
-| `alpha` | 1.0 | reconstruction weight; set on validation, typically hundreds to thousands |
-| `recon_fake_weight` | 0.0 | $\beta$ for synthetic rows |
+| `noise_rank` / `noise_max_rows` | 50 / 150,000 | shared-noise rank behind $\mathbf V$, and the subsample residuals used to fit it |
+| `alpha` | 1.0 | reconstruction weight; `free` only |
+| `recon_fake_weight` | 0.0 | $\beta$ for synthetic rows; `free` only |
 | `basis` | lin, sq, abs, tanh | must keep a non-quadratic statistic |
 | `embedding_dim` / `label_hidden` | 32 / 128 | label network width |
 | `ridge` | 1e-4 | Gram matrix conditioning |
@@ -480,10 +563,11 @@ Defaults of `TrainConfig`:
 | Path | Contents |
 |---|---|
 | `extract/de/` | Welch statistics → `ashr` → merge → pivot; row planning; matrix assembly and `load_matrices` |
-| `extract/data/` | `splits.py` test pairs, validation, `K` thinning and synthetic rows; `gene_filter.py`; `ontarget.py`; `augment.py` label permutation and column shuffle |
-| `extract/models/` | `loadings.py` $\mathbf B$ and the projection; `heads.py`; `label_net.py` |
+| `extract/data/` | `noise.py` noise model and label-driven subspace $\mathbf V$; `splits.py` test pairs, validation, `K` thinning and synthetic rows (including partially shuffled ones); `gene_filter.py`; `ontarget.py`; `augment.py` label permutation and column shuffle |
+| `extract/models/` | `loadings.py` $\mathbf B$, $\mathbf B = \mathbf A\mathbf V$ and the projection; `heads.py`; `label_net.py` |
 | `extract/objectives/` | `contrastive.py` sampler and BCE; `reconstruction.py`; `total_correlation.py` |
 | `extract/train.py` | `TrainConfig`, `Extract`, `fit`, `evaluate`, `prepare`, `encode` |
 | `extract/interpret/` | loadings, sign anchoring, effect decomposition, enrichment export |
-| `extract/evaluation/` | span residual, cross-seed stability, held-out helpers |
+| `extract/evaluation/` | held-out reconstruction (the same function for EXTRACT and every baseline), span residual, cross-seed stability |
+| `baselines/` | PCA, linear ICA, context joint diagonalisation; `scripts/baseline_ica.py` scores ICA on the same split |
 | `scripts/` | build the split, fit one model, run a sweep, summarise it, read test once |

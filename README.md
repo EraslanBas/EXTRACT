@@ -63,15 +63,26 @@ them, does not.
 
 ## How it works
 
-EXTRACT fits one global matrix of gene programs `B` (factors × genes). Factor
-activations are the masked least-squares projection of each response onto `B`,
-so there is one map between factors and genes. `B` is fitted by
+EXTRACT finds the programs in two stages, the structure of ICA with both
+criteria replaced:
 
-    L = L_disc + alpha * L_recon
+1. **The subspace, from signal relative to noise.** Each perturbation is
+   measured on its full set of cells and on random subsets of them; the
+   difference between a subsample and its full-data row is pure measurement
+   noise. From these differences EXTRACT estimates the noise and keeps the `d`
+   directions with the most perturbation-driven variation per unit of noise:
+   the label-driven subspace `V` (`d` × genes), computed once from the training
+   rows.
+2. **The axes, from the labels.** The programs are `B = A V`; only the `d` × `d`
+   matrix `A` is learned, by a contrastive head that must tell whether a
+   response belongs to its (perturbation, context) label and may score each
+   program only separately. That restriction is what makes the axes
+   identifiable.
 
-where reconstruction fixes the subspace of the programs and a per-component
-contrastive head (does this response belong to this perturbation in this
-context?) fixes their orientation inside it.
+Factor activations are the masked least-squares projection of each response
+onto `B`, so there is one map between programs and genes. The one-stage model,
+which learns `B` directly with `L = L_disc + alpha * L_recon`, remains available
+as `subspace="free"`.
 
 ## Layout
 

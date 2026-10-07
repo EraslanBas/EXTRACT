@@ -57,6 +57,13 @@ def build_argparser() -> argparse.ArgumentParser:
     p.add_argument("--contexts", nargs="+", default=None,
                    help="default: every context in the split")
 
+    g = p.add_argument_group("model")
+    g.add_argument("--subspace", default="fixed", choices=["fixed", "free", "anchored"],
+                   help="fixed (default): B = A V, V the label-driven subspace computed "
+                        "from the training rows, only A learned; free: B learned "
+                        "directly (the earlier model)")
+    g.add_argument("--noise-rank", type=int, default=50,
+                   help="rank of the correlated noise behind V")
     g = p.add_argument_group("tuned hyperparameters")
     g.add_argument("--n-factors", "-d", type=int, default=24)
     g.add_argument("--alpha", type=float, default=1.0,
@@ -119,7 +126,7 @@ def main() -> None:
     out_dir = args.out_dir or paths.root() / "models" / split_dir.name
     out_dir.mkdir(parents=True, exist_ok=True)
     tag = (f"d{args.n_factors}_a{args.alpha:g}_b{args.beta:g}"
-           f"_K{args.n_subsamples}_seed{args.seed}")
+           f"_K{args.n_subsamples}_seed{args.seed}_{args.subspace}")
 
     # ---- train/val partition only ---------------------------------------
     t0 = time.time()
@@ -160,11 +167,14 @@ def main() -> None:
         balance_negatives=args.balance_negatives,
         eval_every=args.eval_every, patience=args.patience,
         select_on=args.select_on, log_every=max(1, args.epochs // 25),
+        subspace=args.subspace, noise_rank=args.noise_rank,
     )
     t0 = time.time()
     model, history = fit(config=config, train_rows=train, val_rows=val,
                          is_real=is_real, **fit_args)
     print(f"fit in {time.time() - t0:.1f}s", flush=True)
+    if getattr(model, "subspace_basis_", None) is not None:
+        np.save(out_dir / f"V_{tag}.npy", model.subspace_basis_)
 
     import torch
 

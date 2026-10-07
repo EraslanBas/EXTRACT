@@ -116,8 +116,15 @@ def test_fit_runs_in_each_subspace_mode():
             B = model.loading_matrix()
             Qb, _ = np.linalg.qr(B.T); Qv, _ = np.linalg.qr(V.T)
             assert np.linalg.svd(Qb.T @ Qv, compute_uv=False).min() > 0.999
+    # frozen needs a basis; fixed computes V itself from the training rows
     with pytest.raises(ValueError):
-        fit(X, p, c, s, n, config=TrainConfig(n_factors=3, subspace="fixed"), train_rows=~val)
+        fit(X, p, c, s, n, config=TrainConfig(n_factors=3, subspace="frozen"), train_rows=~val)
+    cfg = TrainConfig(n_factors=3, epochs=1, batch_size=64, eval_every=0, patience=0,
+                      log_every=0, subspace="fixed", noise_rank=2)
+    model, _ = fit(X, p, c, s, n, config=cfg, train_rows=~val)
+    assert model.subspace_basis_.shape == (3, X.shape[1])
+    Qb, _ = np.linalg.qr(model.loading_matrix().T); Qv, _ = np.linalg.qr(model.subspace_basis_.T)
+    assert np.linalg.svd(Qb.T @ Qv, compute_uv=False).min() > 0.999
 
 
 def test_frozen_basis_learns_nothing_in_B():

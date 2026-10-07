@@ -82,22 +82,38 @@ def subsample_residuals(
     divided by ``sqrt(1/n_sub - 1/n_full)``, so every returned row has
     covariance ``Sigma_cell``.
     """
+    real = (meta.is_real.to_numpy(dtype=bool) if "is_real" in meta
+            else np.ones(len(meta), bool))
+    pair = (meta.perturbation.astype(str) + "|" + meta.context.astype(str)).to_numpy()
+    return residuals_from_arrays(X, pair, (meta.variant == "main").to_numpy(),
+                                 meta.n_cells.to_numpy(), rows,
+                                 max_rows=max_rows, seed=seed, is_real=real)
+
+
+def residuals_from_arrays(
+    X: np.ndarray, pair: np.ndarray, is_full: np.ndarray, n_cells: np.ndarray,
+    rows: np.ndarray, max_rows: int | None = None, seed: int = 0,
+    is_real: np.ndarray | None = None,
+) -> np.ndarray:
+    """:func:`subsample_residuals` on plain arrays: ``pair`` [n] any hashable
+    pair key, ``is_full`` [n] marks full-data rows, ``rows`` boolean or index."""
     rows = np.nonzero(rows)[0] if np.asarray(rows).dtype == bool else np.asarray(rows)
-    m = meta.iloc[rows]
-    real = m.is_real.to_numpy(dtype=bool) if "is_real" in m else np.ones(len(m), bool)
-    m, rows = m[real], rows[real]
-    pair = (m.perturbation.astype(str) + "|" + m.context.astype(str)).to_numpy()
-    full = (m.variant == "main").to_numpy()
-    full_of = dict(zip(pair[full], rows[full]))
-    n_full = dict(zip(pair[full], m.n_cells.to_numpy()[full]))
-    sub = np.nonzero(~full & np.isin(pair, list(full_of)))[0]
+    if is_real is not None:
+        rows = rows[np.asarray(is_real, dtype=bool)[rows]]
+    pr, full = np.asarray(pair)[rows], np.asarray(is_full, dtype=bool)[rows]
+    nc = np.asarray(n_cells, dtype=float)[rows]
+    full_of = dict(zip(pr[full], rows[full]))
+    n_full = dict(zip(pr[full], nc[full]))
+    sub = np.nonzero(~full & np.isin(pr, list(full_of)))[0]
     if max_rows is not None and len(sub) > max_rows:
         sub = np.sort(np.random.default_rng(seed).choice(sub, max_rows, replace=False))
+    if not len(sub):
+        raise ValueError("no subsample rows with their full-data row among the given rows; "
+                         "the noise model needs subsampled re-estimates")
     i_sub = rows[sub]
-    i_full = np.array([full_of[p] for p in pair[sub]])
-    ns = m.n_cells.to_numpy()[sub].astype(float)
-    nf = np.array([n_full[p] for p in pair[sub]], dtype=float)
-    scale = 1.0 / np.sqrt(np.clip(1.0 / ns - 1.0 / nf, 1e-12, None))
+    i_full = np.array([full_of[p] for p in pr[sub]])
+    nf = np.array([n_full[p] for p in pr[sub]], dtype=float)
+    scale = 1.0 / np.sqrt(np.clip(1.0 / nc[sub] - 1.0 / nf, 1e-12, None))
     return ((X[i_sub] - X[i_full]) * scale[:, None]).astype(np.float32)
 
 
@@ -153,3 +169,29 @@ def label_subspace(
     V = noise.metric_sqrt(W)                   # patterns a = M v = M^{1/2} w
     V /= np.linalg.norm(V, axis=1, keepdims=True)
     return V.astype(np.float32), evals[order]
+
+
+def label_subspace_from_rows(
+    X: np.ndarray, perturbation_idx: np.ndarray, context_idx: np.ndarray,
+    stratum: np.ndarray, n_cells: np.ndarray, rows: np.ndarray, d: int,
+    rank: int = 50, max_rows: int | None = 150_000, seed: int = 0,
+    is_real: np.ndarray | None = None,
+) -> tuple[np.ndarray, NoiseModel]:
+    """Noise model and label-driven subspace ``V`` [d, G] from the measured
+    rows among ``rows`` (the training rows): subsample residuals for the noise,
+    full-data rows (``stratum == 0``) for the signal. What :func:`extract.train.fit`
+    uses when ``subspace="fixed"`` and no basis is given."""
+    pair = np.asarray(perturbation_idx, dtype=np.int64) * (int(np.max(context_idx)) + 1) \
+        + np.asarray(context_idx, dtype=np.int64)
+    is_full = np.asarray(stratum) == 0
+    R = residuals_from_arrays(X, pair, is_full, n_cells, rows, max_rows, seed, is_real)
+    noise = noise_covariance(R, rank=min(rank, R.shape[0] - 1, R.shape[1] - 1), seed=seed)
+    del R
+    sel = np.zeros(len(X), dtype=bool)
+    r = np.nonzero(rows)[0] if np.asarray(rows).dtype == bool else np.asarray(rows)
+    sel[r] = True
+    if is_real is not None:
+        sel &= np.asarray(is_real, dtype=bool)
+    sel &= is_full
+    V, _ = label_subspace(X[sel], np.asarray(n_cells)[sel], noise, d)
+    return V, noise

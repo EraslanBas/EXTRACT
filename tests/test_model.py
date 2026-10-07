@@ -374,7 +374,7 @@ def _toy_dataset(n_pert=20, n_ctx=3, n_strata=4, n_genes=60, d_true=5, seed=0):
 
 def test_fit_runs_and_reduces_both_terms():
     X, p, c, s, n = _toy_dataset()
-    cfg = TrainConfig(n_factors=5, epochs=12, batch_size=64, log_every=0, seed=0)
+    cfg = TrainConfig(subspace="free", n_factors=5, epochs=12, batch_size=64, log_every=0, seed=0)
     model, history = fit(X, p, c, s, n, target_col=None, config=cfg)
 
     assert len(history) == 12
@@ -792,7 +792,7 @@ def test_recon_fake_weight_changes_the_objective():
     flag = np.concatenate([np.ones(n, bool), np.zeros(n, bool)])
     out = {}
     for beta in (0.0, 1.0):
-        cfg = TrainConfig(n_factors=3, epochs=3, batch_size=128, seed=0,
+        cfg = TrainConfig(subspace="free", n_factors=3, epochs=3, batch_size=128, seed=0,
                           log_every=0, eval_every=0, patience=0,
                           recon_fake_weight=beta)
         m, _ = fit(np.vstack([X, fake]), *[dbl(v) for v in a],

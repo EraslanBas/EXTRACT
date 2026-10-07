@@ -228,7 +228,7 @@ def test_fit_model_script_runs_on_a_split(tmp_path):
         capture_output=True, text=True,
     )
     assert proc.returncode == 0, proc.stdout[-2000:] + proc.stderr[-2000:]
-    summary = json.loads((out / "summary_d3_a1_b0.1_K3_seed0.json").read_text())
+    summary = json.loads((out / "summary_d3_a1_b0.1_K3_seed0_fixed.json").read_text())
     for part in ("train", "val", "test"):
         assert 0.0 <= summary["metrics"][part]["accuracy"] <= 1.0
         assert summary["metrics"][part]["n_synthetic"] > 0

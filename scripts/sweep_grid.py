@@ -168,7 +168,7 @@ def main() -> int:
                          "its metrics row written to cells/<tag>.csv. Cells "
                          "run in descending K (longest first); a worker only "
                          "takes the K values it was given")
-    ap.add_argument("--subspace", nargs="+", default=["free"],
+    ap.add_argument("--subspace", nargs="+", default=["fixed"],
                     choices=["free", "fixed", "anchored", "frozen"],
                     help="how span(B) is set; a grid dimension. fixed / anchored use "
                          "the label-driven subspace from the subsample noise "
