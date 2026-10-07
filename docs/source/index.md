@@ -13,10 +13,19 @@ engages each program in each context.
 
 Each data point is one perturbation in one context: the change in expression of
 every gene, compared with unperturbed control cells from the same context, as a
-log-fold change. Every perturbation is measured twice in the same screen: once
-from all its cells, and again from random subsets of those cells. Both
-estimate the same response; comparing them tells us how much of a measured
-change is real and how much is measurement noise. Genes that no perturbation
+log-fold change. Every perturbation is evaluated several times in the same
+screen: once from all its cells, and again from random subsets of its cells.
+These repeated estimates show how much the logFC readout depends on which cells
+happened to be measured (differences between individual cells) and on how many
+cells were measured.
+
+Assessing this noise within each perturbation matters because a perturbation's
+logFC is an estimate, not an exact value. Perturbations differ widely in how many
+cells they have, and with few cells, random cell-to-cell variation alone can
+produce large apparent changes. Without measuring that variation, a method cannot
+tell a real, reproducible response from one that would change if a different
+set of cells had been sequenced, and it may build gene programs out of noise.
+The repeated estimates let EXTRACT separate the two. Genes that no perturbation
 changes are removed, and nothing else is rescaled.
 
 ## The model in two steps
@@ -27,7 +36,7 @@ $\mathbf B$ (programs × genes) and the activities say how strongly this
 perturbation, in this context, engages each program.
 
 **Step 1: where the programs can live.** Before training, EXTRACT uses the
-two measurements of every perturbation to separate signal from noise, and keeps
+repeated estimates of every perturbation to separate signal from noise, and keeps
 the directions in gene space where responses differ the most *because of the
 perturbations* rather than because of noise. This space, $\mathbf V$, is
 computed directly from the data, not learned.
