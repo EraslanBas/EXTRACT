@@ -43,6 +43,13 @@ correspond to separate biological processes make this task easy; mixtures of
 programs do worse. This is what is meant to make the programs identifiable: the
 same programs each time the model is fitted.
 
+**Two modes.** The two-step model above is the default (`subspace="fixed"`).
+It can also be run in one step (`subspace="free"`), where the programs
+$\mathbf B$ are learned directly, with a reconstruction term choosing the space
+and the discriminator choosing the programs at the same time. The choice is a
+user option, for example `TrainConfig(subspace="free")` or
+`scripts/fit_model.py --subspace free`.
+
 ## Training and choosing a model
 
 The discriminator learns from real responses with their own label, and from

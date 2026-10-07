@@ -84,6 +84,22 @@ onto `B`, so there is one map between programs and genes. The one-stage model,
 which learns `B` directly with `L = L_disc + alpha * L_recon`, remains available
 as `subspace="free"`.
 
+## Choosing the mode
+
+The two-step model is the default. The one-step model, which learns `B`
+directly, is available as an option:
+
+```python
+from extract.train import TrainConfig, fit
+config = TrainConfig(subspace="fixed")   # default: V from the data, then B = A V
+config = TrainConfig(subspace="free")    # one step: B learned directly
+```
+
+```bash
+python scripts/fit_model.py --subspace fixed     # or: --subspace free
+python scripts/sweep_grid.py --subspace fixed free ...   # both, as a grid dimension
+```
+
 ## Layout
 
 ```
