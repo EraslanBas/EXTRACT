@@ -32,6 +32,12 @@ V (frozen)      the label-driven subspace with its initial axes, no training.
 PCA, FastICA    scikit-learn on training full-data rows (ICA: 3 seeds).
 null            mean MCC of 50 random rotations of the PCA basis.
 
+Extra regimes: --families gaussian --active-frac 1.0 with the multiplicative
+structure gives Gaussian sources whose per-program gains depend on the context
+(a CP tensor structure: identifiable from the labels, hard for ICA); with the
+additive structure nothing is identifiable (control). --program-corr w > 0
+makes programs co-engaged, breaking ICA's independence assumption.
+
 Metrics: MCC (Hungarian-matched |correlation| of loadings with B_true),
 subspace overlap with span(B_true), cross-seed MCC, validation accuracy.
 """
@@ -89,7 +95,16 @@ def simulate(family, structure, seed, a):
     G, D, P, C, K = a.genes, a.programs, a.perts, a.contexts, a.subsamples
     rng = np.random.default_rng(seed)
     B = make_B(rng, D, G)
-    act = draw(rng, family, (P, D)) * (rng.random((P, D)) < a.active_frac)
+    w = a.program_corr
+    if w > 0:
+        # correlated programs: a per-perturbation component shared by all its
+        # programs, both in which programs are engaged and in how strongly
+        u = (1 - w) * rng.random((P, D)) + w * rng.random((P, 1))
+        val = (1 - w) * draw(rng, family, (P, D)) + w * draw(rng, family, (P, 1))
+        val = val / np.sqrt((1 - w) ** 2 + w ** 2)          # back to unit variance
+        act = val * (u < a.active_frac)
+    else:
+        act = draw(rng, family, (P, D)) * (rng.random((P, D)) < a.active_frac)
     if structure == "additive":
         S = act[:, None, :] + 0.5 * draw(rng, family, (C, D))[None, :, :]
     elif structure == "multiplicative":
@@ -176,6 +191,7 @@ def run_condition(family, structure, a):
     null = float(np.mean([mcc(B, np.linalg.qr(rng.normal(size=(a.programs,) * 2))[0] @ pca.components_)
                           for _ in range(50)]))
     res = {"family": family, "structure": structure, "noise": a.noise, "amp": a.amp,
+           "active_frac": a.active_frac, "program_corr": a.program_corr,
            "pca": {"mcc": round(mcc(B, pca.components_), 3),
                    "overlap": round(subspace_overlap(B, pca.components_), 3)},
            "fastica": {"mcc": [round(mcc(B, b), 3) for b in icas],
@@ -199,7 +215,8 @@ def run_condition(family, structure, a):
 
 
 def show(r):
-    print(f"\n== {r['family']} / {r['structure']} / noise={r['noise']} amp={r['amp']}  ({r['seconds']}s)")
+    print(f"\n== {r['family']} / {r['structure']} / noise={r['noise']} amp={r['amp']} "
+          f"active={r['active_frac']} corr={r['program_corr']}  ({r['seconds']}s)")
     print(f"  {'method':<22} {'MCC vs truth':<24} {'subspace':<10} {'cross-seed':<10} val acc")
     print(f"  {'PCA':<22} {r['pca']['mcc']:<24} {r['pca']['overlap']:<10}")
     f = r["fastica"]
@@ -224,6 +241,9 @@ def main():
     ap.add_argument("--shared-var", type=float, default=20.0)
     ap.add_argument("--amp", type=float, default=3.0, help="signal amplitude (collaborator's default 3)")
     ap.add_argument("--active-frac", type=float, default=0.5)
+    ap.add_argument("--program-corr", type=float, default=0.0,
+                    help="weight of a per-perturbation component shared by all programs "
+                         "(0 = independent programs, as in ICA's model)")
     ap.add_argument("--genes", type=int, default=400)
     ap.add_argument("--programs", type=int, default=6)
     ap.add_argument("--perts", type=int, default=200)
@@ -254,7 +274,7 @@ def main():
         for structure in a.structures:
             r = run_condition(family, structure, a)
             show(r); results.append(r)
-    tag = f"{a.noise}_amp{a.amp:g}"
+    tag = f"{a.noise}_amp{a.amp:g}_active{a.active_frac:g}_corr{a.program_corr:g}_{'-'.join(a.families)}"
     (out / f"bench_{tag}.json").write_text(json.dumps({"settings": vars(a), "results": results}, indent=1))
     print(f"\nwrote {out / f'bench_{tag}.json'}")
 
