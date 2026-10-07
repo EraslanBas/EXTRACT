@@ -112,42 +112,39 @@ has no masked entry.
 
 ## The label-driven subspace
 
-$\mathbf V$ is not learned by gradient descent. It is computed in closed form
-from the **measured rows of the training pairs** (no synthetic rows, no
-validation or test pairs, and no labels beyond grouping each subsample with its
-own pair) in four steps (`extract.data.noise`).
+$\mathbf V$ is the space the programs are allowed to live in. It is computed
+once, before training, from the measured rows of the training pairs. The aim is
+simple: keep the directions where responses differ **because of the
+perturbation**, not because of measurement noise.
 
-1. **Noise from the subsamples.** A subsample and its pair's full-data row
-   estimate the same response from a random subset of the same cells, against
-   the same fixed controls, so their difference has covariance
-   $\big(1/n_{\text{sub}} - 1/n_{\text{full}}\big)\,\boldsymbol\Sigma_{\text{cell}}$.
-   Each difference, divided by $\sqrt{1/n_{\text{sub}} - 1/n_{\text{full}}}$, is a draw
-   with covariance $\boldsymbol\Sigma_{\text{cell}}$, the per-cell noise covariance
-   across genes. It is fitted as per-gene noise variances plus $r = 50$ shared
-   noise directions $\mathbf U$ with variances $\mathbf s$ (a principal-component
-   fit with a factor-analysis correction, so the per-gene part is not counted
-   twice).
-2. **Signal.** The second moment of the full-data rows minus the noise they
-   carry on average,
-   $\boldsymbol\Sigma_S = \mathbb E[\mathbf x^\top\mathbf x] - \boldsymbol\Sigma_{\text{cell}}\,\mathbb E[1/n]$.
-3. **A noise metric that keeps gene scales.**
-   $\mathbf M = c\,\mathbf I + \mathbf U\operatorname{diag}(\mathbf s)\mathbf U^\top$, with
-   $c$ the mean per-gene noise variance. It counts the shared noise directions
-   as noise but treats every gene's own scale equally: no per-gene rescaling.
-4. **Most signal per unit of noise.** Solve
-   $\boldsymbol\Sigma_S\,\mathbf v = \lambda\,\mathbf M\,\mathbf v$ by whitening with
-   $\mathbf M^{-1/2}$ and keep the top $d$ eigenvectors $\mathbf w$. The eigenvectors
-   are filters; the loading directions are the patterns $\mathbf M^{1/2}\mathbf w$,
-   scaled to unit length, which form the rows of $\mathbf V$ (in logFC units).
+**Measuring the noise.** Every perturbation is measured twice in the same
+screen: on all its cells (the full-data row) and on random subsets of those
+cells (the subsample rows). Both estimate the same response, so the difference
+between a subsample and its full-data row is pure measurement noise. These
+differences tell us how large the noise is in every direction of gene space.
 
-| | chooses directions by | uses the subsamples |
+**Keeping signal, not noise.** The full-data rows show how responses vary in
+total. Subtracting the expected noise leaves the variation due to the
+perturbations. $\mathbf V$ is the $d$ directions with the most of that variation
+relative to the noise:
+
+$$
+\mathbf V = \text{the top } d \text{ directions maximising }
+\frac{\text{perturbation-driven variation}}{\text{measurement noise}} .
+$$
+
+Noise that is shared across many genes (for example a cell-quality axis) counts
+as noise; each gene's own scale is left untouched.
+
+| | picks directions by | uses the subsamples |
 |---|---|---|
 | PCA | total variation (signal + noise) | no |
-| ICA | PCA's subspace, then independent axes inside it | no |
+| ICA | PCA's directions, then the most independent axes inside them | no |
 | $\mathbf V$ | perturbation-driven variation relative to measured noise | yes |
 
-`fit()` computes $\mathbf V$ from its training rows automatically; a
-precomputed basis can also be passed in.
+$\mathbf V$ fixes only the space. Which programs sit inside it is decided during
+training, by the labels (next section). `fit()` computes $\mathbf V$
+automatically (`extract.data.noise`); a precomputed basis can also be passed in.
 
 ## Architecture
 
