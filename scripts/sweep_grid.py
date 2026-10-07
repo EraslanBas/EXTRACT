@@ -177,6 +177,10 @@ def main() -> int:
                     help="external axes for fixed / frozen, e.g. ica=B_ica_d26.npy "
                          "(a [d, G] .npy); a grid dimension. Default: the "
                          "label-driven subspace V. Tags get _<mode>_<name>")
+    ap.add_argument("--head-basis", nargs="+", default=["linear,square,abs,tanh"],
+                    help="statistics the head applies to each factor, one comma-"
+                         "separated set per grid value, e.g. abs  linear,abs. "
+                         "Non-default sets add _head-<names> to the tag")
     ap.add_argument("--noise-rank", type=int, default=50,
                     help="rank of the correlated-noise part of the noise model")
     ap.add_argument("--noise-max-rows", type=int, default=150_000,
@@ -267,7 +271,7 @@ def main() -> int:
     basis_names = list(ext_bases) or [None]
     cells = [c for c in itertools.product(args.d, args.alpha, args.beta,
                                           args.n_subsamples, args.seeds, args.subspace,
-                                          basis_names)
+                                          basis_names, args.head_basis)
              if c[5] in ("fixed", "frozen") or c[6] == basis_names[0]]
     if queue is not None:
         # longest first (cost grows with K): the expensive cells start early
@@ -276,11 +280,13 @@ def main() -> int:
     print(f"{len(cells)} cells, {len(cells)-len(done)} to run\n", flush=True)
 
     records = []
-    for i, (d, a, b, K, seed, sub, bname) in enumerate(cells, 1):
+    for i, (d, a, b, K, seed, sub, bname, hbasis) in enumerate(cells, 1):
+        head = tuple(hbasis.split(","))
         named = bname is not None and sub in ("fixed", "frozen")
         use_ext = named and ext_bases[bname] is not None
         tag = (f"d{d}_a{a:g}_b{b:g}_K{K}_seed{seed}" + ("" if sub == "free" else f"_{sub}")
-               + (f"_{bname}" if named else ""))
+               + (f"_{bname}" if named else "")
+               + ("" if head == ("linear", "square", "abs", "tanh") else f"_head-{'-'.join(head)}"))
         # re-read each time: cheap, and means a cell finished by any earlier
         # or concurrent process is never repeated
         if queue is not None:
@@ -304,7 +310,7 @@ def main() -> int:
                           device=args.device, log_every=0,
                           eval_every=args.eval_every, patience=args.patience,
                           min_epochs=args.min_epochs,
-                          select_on=args.select_on, subspace=sub)
+                          select_on=args.select_on, subspace=sub, basis=head)
         snaps: dict[int, np.ndarray] = {}
         model, hist = fit(config=cfg, train_rows=~val, val_rows=val,
                           is_real=is_real, synth_level=synth_level,
@@ -338,7 +344,7 @@ def main() -> int:
         fa["is_real"] = is_real
         fa["synth_level"] = synth_level
         row = {"tag": tag, "d": d, "alpha": a, "beta": b, "K": K, "seed": seed,
-               "subspace": sub, "basis": (bname if named else ("V" if sub != "free" else "")),
+               "subspace": sub, "head_basis": ",".join(head), "basis": (bname if named else ("V" if sub != "free" else "")),
                "epochs_run": len(hist), "seconds": round(time.time()-t, 1)}
         for name, rows_ in (("train", np.nonzero(~val)[0]), ("val", np.nonzero(val)[0])):
             m = score(fa, rows_, X_t, col_t, w_t)
