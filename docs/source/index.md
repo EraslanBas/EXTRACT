@@ -3,18 +3,75 @@
 **EX**pression programs from **T**reatment **R**esponses **A**cross **C**ontexts
 via **T**ensors.
 
-EXTRACT is a contrastive, identifiable factor model for perturbation × context
-screens. The screen is a three-way array (perturbation × context × gene), and
-EXTRACT recovers the gene programs behind it: one matrix $\mathbf B$ that maps
-$d$ latent programs to genes, shared by every perturbation and every context.
-It works in two stages. First it chooses the **subspace** the programs live in:
-the directions with the most perturbation-driven signal relative to measurement
-noise, measured from the screen's own subsampled replicates. Then it chooses the
-**axes** inside that subspace, the individual programs, by asking a deliberately
-restricted discriminator whether a response vector belongs to the
-(perturbation, context) label attached to it.
+EXTRACT finds the gene programs behind a perturbation screen that was run in
+several contexts (for example, the same CRISPR perturbations under different
+drugs). It learns a small set of programs, groups of genes that move together,
+shared by the whole screen, and tells you how strongly each perturbation
+engages each program in each context.
 
-## What the model is
+## The data
+
+Each data point is one perturbation in one context: the change in expression of
+every gene, compared with unperturbed control cells from the same context, as a
+log-fold change. Every perturbation is measured twice in the same screen: once
+from all its cells, and again from random subsets of those cells. Both
+estimate the same response; comparing them tells us how much of a measured
+change is real and how much is measurement noise. Genes that no perturbation
+changes are removed, and nothing else is rescaled.
+
+## The model in two steps
+
+A measured response is assumed to be a mix of a few gene programs:
+response ≈ activities × programs, where the programs are the rows of a matrix
+$\mathbf B$ (programs × genes) and the activities say how strongly this
+perturbation, in this context, engages each program.
+
+**Step 1: where the programs can live.** Before training, EXTRACT uses the
+two measurements of every perturbation to separate signal from noise, and keeps
+the directions in gene space where responses differ the most *because of the
+perturbations* rather than because of noise. This space, $\mathbf V$, is
+computed directly from the data, not learned.
+
+**Step 2: which programs.** Inside that space, the programs themselves are
+learned as $\mathbf B = \mathbf A\mathbf V$, where $\mathbf A$ is a small matrix.
+They are chosen by a discriminator that is shown a response together with a
+(perturbation, context) label and asked: does this response belong to this
+label? For each program it checks whether the response's activity looks like
+what the label implies, adds this evidence over all programs, and decides real
+or fake. Because each program is judged on its own, only programs that
+correspond to separate biological processes make this task easy; mixtures of
+programs do worse. This is what is meant to make the programs identifiable: the
+same programs each time the model is fitted.
+
+## Training and choosing a model
+
+The discriminator learns from real responses with their own label, and from
+two kinds of fakes, in equal numbers: real responses with a wrong label, and
+artificial responses made by shuffling genes across responses, which keeps each
+gene's values but destroys which genes move together. The data are split by
+(perturbation, context) pair into training, validation and test sets; a
+validation or test pair is never seen during training. Each model is kept at the
+training step where it best tells real from wrong-label responses on
+validation pairs, and models are compared on validation only. Test pairs are
+used once, at the end.
+
+## Reading the results
+
+- **Programs:** each row of $\mathbf B$ is one program, a weight for every gene
+  in log-fold-change units. Its top genes say what the program is.
+- **Activities:** for each perturbation in each context, how far each program
+  moves: up, down, or not at all.
+- **Effects:** activities split into what a perturbation does everywhere, what a
+  context does on its own, and the **interaction**: where a perturbation's effect
+  on a program depends on the context.
+
+The [Supplement](#supplement) gives the full method: the data processing, how
+$\mathbf V$ is computed, the architecture and objective, negative sampling,
+training, evaluation, configuration and the code layout.
+
+## Supplement
+
+### Model overview
 
 Each row is a vector $\mathbf x \in \mathbb R^G$ of `ashr`-shrunken log-fold
 changes for one perturbation $p$ in one context $c$ (for example a drug
@@ -61,7 +118,7 @@ $\mathcal L = \mathcal L_{\text{disc}} + \alpha\,\mathcal L_{\text{recon}}$,
 reconstruction choosing the subspace and discrimination the axes; it remains
 available as `subspace="free"`.
 
-## What a row is
+### What a row is
 
 The model never sees counts. The `de/` package turns cell-level single-cell
 data into one matrix per context:
@@ -89,7 +146,7 @@ Two row-level facts are carried into training. The **stratum** $s$ (0 for the
 full-data row, $k+1$ for `__sub{k}`) is the row's precision tier. The **cell
 count** $n$ drives the reconstruction weight.
 
-### The gene axis
+#### The gene axis
 
 No centring or per-gene scaling is applied anywhere. `ashr` has already put
 every entry on a common logFC scale; dividing by per-gene standard deviation
@@ -100,7 +157,7 @@ change) in more than 150 (perturbation, context) pairs, counted on the
 full-data rows of the training pairs only. The same list is used for every
 partition and every fit.
 
-### The on-target mask
+#### The on-target mask
 
 Knocking down gene X drops X's own transcript by roughly its control mean.
 These entries sit 40 to 50 standard errors from zero and carry a median 25% of
@@ -110,7 +167,7 @@ controls or unmatched names), and that column is excluded from the projection,
 the reconstruction error and the span residual alike. A compound screen simply
 has no masked entry.
 
-## The label-driven subspace
+### The label-driven subspace
 
 $\mathbf V$ is the space the programs are allowed to live in. It is computed
 once, before training, from the measured rows of the training pairs. The aim is
@@ -165,13 +222,13 @@ variation is mostly perturbation-driven.
 | ICA | PCA's directions, then the most independent axes inside them | no |
 | $\mathbf V$ | perturbation-driven variation relative to measured noise | yes |
 
-The full derivation of $\mathbf V$ is given in the [Appendix](#appendix).
+The full derivation of $\mathbf V$ is given below.
 
 $\mathbf V$ fixes only the space. Which programs sit inside it is decided during
 training, by the labels (next section). `fit()` computes $\mathbf V$
 automatically (`extract.data.noise`); a precomputed basis can also be passed in.
 
-## Architecture
+### Architecture
 
 There are three learned parts and no encoder: the loadings $\mathbf B$, a
 label network, and a per-component head (`extract.train.Extract`).
@@ -238,7 +295,7 @@ label network, and a per-component head (`extract.train.Extract`).
 <p class="ex-caption">One forward pass. Blue marks B and the two maps derived from it; red marks the loss terms. The label u reaches the score only through λ, which multiplies per-factor statistics before the sum.</p>
 ```
 
-### Loadings: one map, no encoder
+#### Loadings: one map, no encoder
 
 $\mathbf B$ is a single parameter of shape $d \times G$. Factor activations are
 not predicted by a network; they are the least-squares coordinates of
@@ -275,7 +332,7 @@ since $\mathbf x$ is already a difference from controls. The squared error
 skips the masked entry and is divided by the number of retained genes, so its
 scale does not depend on $G$.
 
-### Label network: where all the interaction lives
+#### Label network: where all the interaction lives
 
 The label network maps $(p, c)$ to coefficients
 $\boldsymbol\lambda \in \mathbb R^{d \times J}$. It concatenates a perturbation
@@ -292,7 +349,7 @@ perturbation and context were both seen but never together, be scored at all.
 The network itself is unconstrained: the identifiability restriction applies
 only to how $\boldsymbol\lambda$ meets $\mathbf z$.
 
-### Per-component head: the identifiability constraint
+#### Per-component head: the identifiability constraint
 
 $$
 s(\mathbf x, u) \;=\; \sum_{k=1}^{d}\sum_{j=1}^{J} \lambda_{kj}(u)\, q_j(z_k) \;+\; b,
@@ -326,7 +383,7 @@ of rows within a pair is subsampling noise, which the stratified negatives
 deliberately hide from the discriminator. The theorem therefore does not
 transfer exactly, and only the structural argument above is claimed.
 
-### Shapes
+#### Shapes
 
 | Tensor | Shape | Where | Note |
 |---|---|---|---|
@@ -340,9 +397,9 @@ transfer exactly, and only the structural argument above is claimed.
 | `λ` | [batch, d, J] | label network | label-dependent coefficients |
 | `s` | [batch] | head | real/fake logit |
 
-## Objective
+### Objective
 
-### Discrimination fixes the orientation
+#### Discrimination fixes the orientation
 
 $$
 \mathcal L_{\text{disc}} = \mathrm{BCE}\big(s(\mathbf x, u), 1\big) + \mathrm{BCE}\big(s(\mathbf x^{-}, u^{-}), 0\big)
@@ -353,7 +410,7 @@ observed vector and swaps the label; whole rows move as units, so the marginal
 law of $\mathbf x$ is preserved exactly and the only way to win is to model how
 $\mathbf x$ depends on $u$.
 
-### Reconstruction
+#### Reconstruction
 
 With $\mathbf B = \mathbf A\mathbf V$ the span cannot move, and the projection onto a
 span does not depend on the axes chosen inside it, so every reconstruction
@@ -402,14 +459,14 @@ interact. Too low and $\mathcal L_{\text{disc}}$ picks tiny-variance directions
 that separate contexts but carry no gene program; too high and the model
 collapses towards PCA and stops responding to the label.
 
-### Independence term: optional, off by default
+#### Independence term: optional, off by default
 
 A total-correlation penalty (FactorVAE style: an MLP learns to separate
 $\mathbf z$ from a coordinate-wise batch shuffle) is available. Independence is
 not identifiability: Darmois' construction gives independent components that are
 still mixtures, so this term cannot do the head's job.
 
-## Negatives
+### Negatives
 
 Naive label permutation is solved by precision rather than biology: the noise
 scale of $\mathbf x$ encodes $n$, and $n$ is tied to perturbation identity. The
@@ -441,7 +498,7 @@ With one context only the first strategy exists, and it suffices.
   Synthetic rows are loaded at half the number of measured rows, so they make up
   half the negatives.
 
-## Training loop
+### Training loop
 
 `fit()` takes the rows, their integer-encoded perturbation and context, stratum,
 cell count, on-target column, an `is_real` flag and train/validation masks.
@@ -469,7 +526,7 @@ recorded per epoch. $\mathbf B$ can be snapshotted at every evaluation. With onl
 $\mathbf A$ and the label network learning, validation accuracy typically peaks
 within the first few dozen epochs.
 
-## Splits and model selection
+### Splits and model selection
 
 **Three partitions, split by pair.** All rows of a (perturbation, context) pair,
 full-data and subsamples, share cells, so they always move together.
@@ -509,7 +566,7 @@ not differences.
 **The test read.** The chosen configuration's test metrics are read once, and
 the read is logged.
 
-## Evaluation
+### Evaluation
 
 | Metric | Tests |
 |---|---|
@@ -525,7 +582,7 @@ global $\mathbf B$ allows non-additive interactions, but only as re-weightings
 of the same $d$ programs. With a few contexts and thousands of perturbations,
 contexts are the scarce resource for deciding which programs exist.
 
-## Reading the factors
+### Reading the factors
 
 **Loadings.** Row $\mathbf B_k$ is program $k$, already in logFC units; no
 back-transform is needed.
@@ -553,7 +610,7 @@ or when nothing engages it.
 comparing them with the global $\mathbf B$ tests the single-$\mathbf B$
 assumption directly.
 
-## Configuration
+### Configuration
 
 Defaults of `TrainConfig`:
 
@@ -577,7 +634,7 @@ Defaults of `TrainConfig`:
 | `unconstrained_head` | False | ablation: removes identifiability |
 | `no_mask` | False | ablation: knockdown claims a factor |
 
-## Module map
+### Module map
 
 | Path | Contents |
 |---|---|
@@ -590,8 +647,6 @@ Defaults of `TrainConfig`:
 | `extract/evaluation/` | held-out reconstruction (the same function for EXTRACT and every baseline), span residual, cross-seed stability |
 | `baselines/` | PCA, linear ICA, context joint diagonalisation; `scripts/baseline_ica.py` scores ICA on the same split |
 | `scripts/` | build the split, fit one model, run a sweep, summarise it, read test once |
-
-## Appendix
 
 ### Computing $\mathbf V$ in closed form
 
