@@ -132,6 +132,14 @@ class TrainConfig:
     #: activities zhat (``basis`` is then unused). See models.heads.
     head: str = "statistics"
 
+    #: Weight rho of the activity-sparsity penalty,
+    #: rho * sum_k mean_rows |z_k| / sd(z_k), over the batch's measured
+    #: full-data rows. Each perturbation should engage few programs; mixing the
+    #: axes spreads every response over many factors, so the penalty prefers
+    #: the true axes. Dividing by each factor's spread (kept in the graph)
+    #: stops A from lowering it by rescaling a factor. 0 = off.
+    sparsity: float = 0.0
+
     #: Ablation only: replaces the per-component head with an MLP, which
     #: destroys identifiability. See models.heads.UnconstrainedHead.
     unconstrained_head: bool = False
@@ -466,6 +474,7 @@ def fit(
     X_t = torch.from_numpy(X).to(device)
     w_t = torch.from_numpy(w.astype(np.float32)).to(device)
     real_t = torch.from_numpy(is_real).to(device)
+    full_t = torch.from_numpy(stratum == 0).to(device)
     p_all = torch.from_numpy(perturbation_idx).to(device)
     c_all = torch.from_numpy(context_idx).to(device)
     if target_col is None or config.no_mask:
@@ -506,7 +515,7 @@ def fit(
         model.train()
         order = rng.permutation(len(train_idx))
         totals = {"disc": 0.0, "recon": 0.0, "recon_measured": 0.0,
-                  "recon_synth": 0.0, "tc": 0.0, "accuracy": 0.0}
+                  "recon_synth": 0.0, "tc": 0.0, "sparsity": 0.0, "accuracy": 0.0}
         n_batches = 0
 
         for start in range(0, len(train_idx), config.batch_size):
@@ -609,6 +618,13 @@ def fit(
 
             loss = loss_d + config.alpha * loss_r             # eq. (12)
 
+            loss_s = torch.zeros((), device=device)
+            if config.sparsity:
+                zf = z[keep & full_t[rows_t]]
+                if len(zf) > 1:
+                    loss_s = (zf.abs() / (zf.std(0) + 1e-8)).mean(0).sum()
+                    loss = loss + config.sparsity * loss_s
+
             loss_tc = torch.zeros((), device=device)
             if tc_disc is not None:
                 loss_tc = tc_penalty(tc_disc, z)
@@ -634,6 +650,7 @@ def fit(
             totals["recon_measured"] += float(loss_r_measured)
             totals["recon_synth"] += float(loss_r_synth)
             totals["tc"] += float(loss_tc)
+            totals["sparsity"] += float(loss_s)
             totals["accuracy"] += discrimination_accuracy(real, fake)
             n_batches += 1
 

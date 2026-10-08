@@ -173,7 +173,7 @@ def cross_seed(Bs):
 def run_fit(a, X, pi, ci, st, nc, tr, va, seed, **kw):
     cfg = TrainConfig(n_factors=a.programs, epochs=a.epochs, eval_every=a.eval_every, patience=0,
                       select_on="accuracy", seed=seed, log_every=0, noise_rank=a.noise_rank,
-                      head=a.head, **kw)
+                      head=a.head, sparsity=a.sparsity, **kw)
     with contextlib.redirect_stdout(io.StringIO()):
         model, hist = fit(X, pi, ci, st, nc, config=cfg, train_rows=tr, val_rows=va)
     best = max((h for h in hist if "val_accuracy" in h), key=lambda h: h["val_accuracy"])
@@ -279,6 +279,8 @@ def main():
                     help="shorthand for --label-models product")
     ap.add_argument("--head", default="statistics", choices=["statistics", "distance"],
                     help="discriminator head for every EXTRACT fit")
+    ap.add_argument("--sparsity", type=float, default=0.0,
+                    help="weight of the activity-sparsity penalty for every EXTRACT fit")
     ap.add_argument("--interaction", type=float, default=1.0,
                     help="ammi structure: scale of the interaction f_p * h_c")
     ap.add_argument("--eval-every", type=int, default=5)
@@ -306,6 +308,8 @@ def main():
         tag += f"_lm-{'-'.join(a.label_models)}"
     if a.head != "statistics":
         tag += f"_head-{a.head}"
+    if a.sparsity:
+        tag += f"_sparse{a.sparsity:g}"
     (out / f"bench_{tag}.json").write_text(json.dumps({"settings": vars(a), "results": results}, indent=1))
     print(f"\nwrote {out / f'bench_{tag}.json'}")
 

@@ -220,6 +220,14 @@ def test_fit_runs_with_the_distance_head(label_model):
     assert history[-1]["disc"] < history[0]["disc"]
 
 
+def test_sparsity_penalty_runs_and_is_logged():
+    X, p, c, s, n = _toy_dataset()
+    cfg = TrainConfig(n_factors=5, epochs=4, batch_size=64, log_every=0, seed=0,
+                      head="distance", sparsity=0.1, noise_rank=3, axes_init="random")
+    model, history = fit(X, p, c, s, n, target_col=None, config=cfg)
+    assert all(h["sparsity"] > 0 for h in history)
+
+
 @pytest.mark.parametrize("label_model", ["product", "ammi"])
 def test_fit_runs_with_a_structured_label_model(label_model):
     X, p, c, s, n = _toy_dataset()
