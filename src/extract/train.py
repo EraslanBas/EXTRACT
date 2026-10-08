@@ -20,7 +20,7 @@ from torch import nn
 
 from .data.ontarget import on_target_index
 from .models import (AMMILabelNet, FactorizedLabelNet, ProductLabelNet, FixedBasisLoadings, GlobalLoadings,
-                     PerComponentHead, UnconstrainedHead)
+                     PerComponentHead, UnconstrainedHead, DistanceHead)
 from .models.heads import DEFAULT_BASIS
 from .models.loadings import NO_MASK
 from .objectives import (
@@ -126,6 +126,12 @@ class TrainConfig:
     #: interaction alone. See models.label_net.
     label_model: str = "mlp"
 
+    #: Discriminator head. ``"statistics"``: sum_k sum_j lambda_kj(u) q_j(z_k)
+    #: over the statistics in ``basis``. ``"distance"``: b - sum_k (z_k -
+    #: zhat_k(u))^2 / (2 sigma_k^2), with the label model predicting the
+    #: activities zhat (``basis`` is then unused). See models.heads.
+    head: str = "statistics"
+
     #: Ablation only: replaces the per-component head with an MLP, which
     #: destroys identifiability. See models.heads.UnconstrainedHead.
     unconstrained_head: bool = False
@@ -201,21 +207,29 @@ class Extract(nn.Module):
                 with torch.no_grad():
                     self.loadings.B.copy_(torch.as_tensor(np.asarray(subspace_basis), dtype=torch.float32))
                 self.loadings.set_noise_metric(noise_model.U, noise_model.s, noise_model.c)
-        self.head = (
-            UnconstrainedHead(config.n_factors, len(config.basis))
-            if config.unconstrained_head
-            else PerComponentHead(config.basis)
-        )
+        if config.head not in ("statistics", "distance"):
+            raise ValueError(f"head must be 'statistics' or 'distance', got {config.head!r}")
+        if config.head == "distance":
+            if config.unconstrained_head:
+                raise ValueError("unconstrained_head is an ablation of the statistics head")
+            self.head = DistanceHead(config.n_factors)
+        else:
+            self.head = (
+                UnconstrainedHead(config.n_factors, len(config.basis))
+                if config.unconstrained_head
+                else PerComponentHead(config.basis)
+            )
+        n_basis = self.head.n_basis if config.head == "distance" else len(config.basis)
         if config.label_model in ("product", "ammi"):
             net = ProductLabelNet if config.label_model == "product" else AMMILabelNet
             self.label_net = net(n_perturbations, n_contexts,
-                                             config.n_factors, len(config.basis))
+                                             config.n_factors, n_basis)
         elif config.label_model == "mlp":
             self.label_net = FactorizedLabelNet(
                 n_perturbations=n_perturbations,
                 n_contexts=n_contexts,
                 n_factors=config.n_factors,
-                n_basis=len(config.basis),
+                n_basis=n_basis,
                 embedding_dim=config.embedding_dim,
                 hidden=config.label_hidden,
             )
@@ -251,6 +265,8 @@ class Extract(nn.Module):
         if isinstance(self.head, UnconstrainedHead):
             raise TypeError("the unconstrained head has no per-component terms")
         lam = self.label_net(perturbation_idx, context_idx)
+        if isinstance(self.head, DistanceHead):
+            return self.head.evidence(z, lam)
         return (lam * self.head.statistics(z)).sum(dim=-1)
 
     @property

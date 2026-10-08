@@ -129,3 +129,35 @@ class UnconstrainedHead(nn.Module):
     def forward(self, z: torch.Tensor, lam: torch.Tensor) -> torch.Tensor:
         flat = torch.cat([z, lam.flatten(start_dim=1)], dim=1)
         return self.net(flat).squeeze(-1)
+
+
+class DistanceHead(nn.Module):
+    """Score a row by how far its activities are from the label's prediction.
+
+        logit = b - sum_k (z_k - zhat_k(u))^2 / (2 sigma_k^2)
+
+    ``lam`` here is the predicted activity ``zhat`` [batch, n_factors, 1], in
+    the same units as ``z``: the label model says how active each program
+    should be, and a large ``z_k`` on a program predicted to be untouched
+    counts against the label. This makes the discriminator consistent with
+    reconstruction (``x ~ z B``, ``z ~ zhat(u)``, so ``x ~ zhat(u) B``). Up to
+    a constant it is the Gaussian log-likelihood of ``z`` given the label,
+    with one learned noise level ``sigma_k`` per factor. Separable in the
+    components, like :class:`PerComponentHead`.
+    """
+
+    n_basis = 1
+
+    def __init__(self, n_factors: int):
+        super().__init__()
+        self.log_sigma = nn.Parameter(torch.zeros(n_factors))
+        self.bias = nn.Parameter(torch.zeros(1))
+
+    def evidence(self, z: torch.Tensor, lam: torch.Tensor) -> torch.Tensor:
+        """``-e_k`` per factor, [batch, n_factors]."""
+        if lam.shape != (*z.shape, 1):
+            raise ValueError(f"lam has shape {tuple(lam.shape)}, expected {(*z.shape, 1)}")
+        return -(z - lam[..., 0]) ** 2 / (2 * torch.exp(2 * self.log_sigma))
+
+    def forward(self, z: torch.Tensor, lam: torch.Tensor) -> torch.Tensor:
+        return self.evidence(z, lam).sum(dim=1) + self.bias

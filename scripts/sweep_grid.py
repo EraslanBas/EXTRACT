@@ -184,6 +184,9 @@ def main() -> int:
     ap.add_argument("--axes-init", default="identity", choices=["identity", "random"],
                     help="fixed mode: start A at the identity or at a random rotation "
                          "(per seed); random adds _Arandom to the tag")
+    ap.add_argument("--head", default="statistics", choices=["statistics", "distance"],
+                   help="discriminator head: per-factor statistics (default) or the distance "
+                        "between measured and predicted activity; distance adds _dist to the tag")
     ap.add_argument("--label-model", default="mlp", choices=["mlp", "product", "ammi"],
                     help="label -> lambda map: unconstrained MLP, the structured "
                          "product f(p) * g(c), or ammi a(p) + b(c) + f(p) * g(c); "
@@ -295,7 +298,8 @@ def main() -> int:
                + (f"_{bname}" if named else "")
                + ("" if head == ("linear", "square", "abs", "tanh") else f"_head-{'-'.join(head)}")
                + ("_Arandom" if args.axes_init == "random" and sub == "fixed" else "")
-               + ("" if args.label_model == "mlp" else f"_{args.label_model}"))
+               + ("" if args.label_model == "mlp" else f"_{args.label_model}")
+               + ("_dist" if args.head == "distance" else ""))
         # re-read each time: cheap, and means a cell finished by any earlier
         # or concurrent process is never repeated
         if queue is not None:
@@ -320,7 +324,7 @@ def main() -> int:
                           eval_every=args.eval_every, patience=args.patience,
                           min_epochs=args.min_epochs,
                           select_on=args.select_on, subspace=sub, basis=head,
-                          axes_init=args.axes_init, label_model=args.label_model)
+                          axes_init=args.axes_init, label_model=args.label_model, head=args.head)
         snaps: dict[int, np.ndarray] = {}
         model, hist = fit(config=cfg, train_rows=~val, val_rows=val,
                           is_real=is_real, synth_level=synth_level,
@@ -355,7 +359,7 @@ def main() -> int:
         fa["synth_level"] = synth_level
         row = {"tag": tag, "d": d, "alpha": a, "beta": b, "K": K, "seed": seed,
                "subspace": sub, "head_basis": ",".join(head), "basis": (bname if named else ("V" if sub != "free" else "")),
-               "label_model": args.label_model,
+               "label_model": args.label_model, "head": args.head,
                "epochs_run": len(hist), "seconds": round(time.time()-t, 1)}
         for name, rows_ in (("train", np.nonzero(~val)[0]), ("val", np.nonzero(val)[0])):
             m = score(fa, rows_, X_t, col_t, w_t)

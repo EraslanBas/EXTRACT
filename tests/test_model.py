@@ -9,7 +9,7 @@ import torch
 
 from extract.data.ontarget import mask_coverage, on_target_index
 from extract.evaluation import span_residual
-from extract.models import NO_MASK, GlobalLoadings, PerComponentHead
+from extract.models import NO_MASK, DistanceHead, GlobalLoadings, PerComponentHead
 from extract.models.label_net import AMMILabelNet, FactorizedLabelNet, ProductLabelNet
 from extract.objectives import (
     DEFAULT_WEIGHTS,
@@ -196,6 +196,28 @@ def test_ammi_label_net_interaction_is_rank_one_after_removing_main_effects():
     T = T - T.mean(0, keepdim=True) - T.mean(1, keepdim=True) + T.mean()
     s = torch.linalg.svdvals(T)
     assert s[1] < 1e-4 * s[0]
+
+
+def test_distance_head_is_b_minus_the_scaled_squared_mismatch():
+    head = DistanceHead(3)
+    with torch.no_grad():
+        head.log_sigma.copy_(torch.log(torch.tensor([1.0, 2.0, 0.5])))
+        head.bias.fill_(1.5)
+    z = torch.tensor([[2.0, 0.1, -1.0]])
+    zhat = torch.tensor([[1.8, 0.0, -0.9]]).unsqueeze(-1)
+    e = (z - zhat[..., 0]) ** 2 / (2 * torch.tensor([1.0, 4.0, 0.25]))
+    assert torch.allclose(head(z, zhat), 1.5 - e.sum(1))
+    assert torch.allclose(head.evidence(z, zhat).sum(1) + head.bias, head(z, zhat))
+
+
+@pytest.mark.parametrize("label_model", ["mlp", "product", "ammi"])
+def test_fit_runs_with_the_distance_head(label_model):
+    X, p, c, s, n = _toy_dataset()
+    cfg = TrainConfig(n_factors=5, epochs=6, batch_size=64, log_every=0, seed=0,
+                      label_model=label_model, head="distance", noise_rank=3)
+    model, history = fit(X, p, c, s, n, target_col=None, config=cfg)
+    assert isinstance(model.head, DistanceHead)
+    assert history[-1]["disc"] < history[0]["disc"]
 
 
 @pytest.mark.parametrize("label_model", ["product", "ammi"])

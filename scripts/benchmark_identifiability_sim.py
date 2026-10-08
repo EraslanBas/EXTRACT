@@ -172,7 +172,8 @@ def cross_seed(Bs):
 
 def run_fit(a, X, pi, ci, st, nc, tr, va, seed, **kw):
     cfg = TrainConfig(n_factors=a.programs, epochs=a.epochs, eval_every=a.eval_every, patience=0,
-                      select_on="accuracy", seed=seed, log_every=0, noise_rank=a.noise_rank, **kw)
+                      select_on="accuracy", seed=seed, log_every=0, noise_rank=a.noise_rank,
+                      head=a.head, **kw)
     with contextlib.redirect_stdout(io.StringIO()):
         model, hist = fit(X, pi, ci, st, nc, config=cfg, train_rows=tr, val_rows=va)
     best = max((h for h in hist if "val_accuracy" in h), key=lambda h: h["val_accuracy"])
@@ -276,6 +277,8 @@ def main():
                          "(identity and random A)")
     ap.add_argument("--product", dest="label_models", action="store_const", const=["product"],
                     help="shorthand for --label-models product")
+    ap.add_argument("--head", default="statistics", choices=["statistics", "distance"],
+                    help="discriminator head for every EXTRACT fit")
     ap.add_argument("--interaction", type=float, default=1.0,
                     help="ammi structure: scale of the interaction f_p * h_c")
     ap.add_argument("--eval-every", type=int, default=5)
@@ -301,6 +304,8 @@ def main():
         tag += f"_{'-'.join(a.structures)}" + (f"_int{a.interaction:g}" if "ammi" in a.structures else "")
     if a.label_models:
         tag += f"_lm-{'-'.join(a.label_models)}"
+    if a.head != "statistics":
+        tag += f"_head-{a.head}"
     (out / f"bench_{tag}.json").write_text(json.dumps({"settings": vars(a), "results": results}, indent=1))
     print(f"\nwrote {out / f'bench_{tag}.json'}")
 
