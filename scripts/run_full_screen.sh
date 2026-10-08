@@ -23,7 +23,7 @@ for ctx in "$@"; do
   # nothing because both python and grep were block-buffering.
   $PY -u "$ROOT/scripts/compute_se_shards.py" \
       --screen-dir "$SCREEN" --out-dir "$OUT" --contexts "$ctx" \
-      --n-control-cells 100000 --n-subsamples 10 --spacing linear \
+      --n-control-cells 100000 --n-subsamples 10 --spacing linear ${SE_EXTRA:-} \
       --shard-jobs "$SE_JOBS" --summary "$OUT/summary_${ctx}.csv" \
       2>&1 | grep --line-buffered -vE "ImplicitModification|warnings.warn|utils.warn_names"
   echo "[$(date '+%F %T')] $ctx stage 1 exited (pipeline status: ${PIPESTATUS[0]:-?})"

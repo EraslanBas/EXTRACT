@@ -108,6 +108,23 @@ def subsample_sizes(
     return sorted(set(sizes.tolist()))
 
 
+def disjoint_replicates(
+    idx: np.ndarray, replicate_cells: int, max_replicates: int, rng: np.random.Generator
+) -> list[np.ndarray]:
+    """Up to ``max_replicates`` non-overlapping groups of exactly
+    ``replicate_cells`` cells from ``idx``.
+
+    The cells are shuffled once and cut into consecutive blocks, so no cell is
+    in more than one group. Every group has the same size in every pair: equal
+    precision across replicates and across perturbations, so neither the
+    replicate index nor a perturbation's cell count changes the noise scale.
+    Pairs with fewer than ``replicate_cells`` cells get none.
+    """
+    n_rep = min(max_replicates, len(idx) // replicate_cells)
+    shuffled = rng.permutation(idx)
+    return [shuffled[k * replicate_cells:(k + 1) * replicate_cells] for k in range(n_rep)]
+
+
 def plan_augmentation(
     perturbations: np.ndarray,
     control_label: str,

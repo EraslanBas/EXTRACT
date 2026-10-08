@@ -26,7 +26,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-from .arms import MIN_CELLS_TO_SUBSAMPLE, SUBSAMPLE_SEP, subsample_sizes
+from .arms import MIN_CELLS_TO_SUBSAMPLE, SUBSAMPLE_SEP, disjoint_replicates, subsample_sizes
 
 COMPUTE_SE = Path(__file__).resolve().parent / "ComputeSE.py"
 LABEL_KEY = "mf_label"
@@ -114,12 +114,24 @@ def plan_shard_rows(
     min_cells_to_subsample: int = MIN_CELLS_TO_SUBSAMPLE,
     spacing: str = "linear",
     seed: int = 0,
+    scheme: str = "nested",
+    replicate_cells: int = 100,
 ) -> tuple[np.ndarray, np.ndarray, pd.DataFrame]:
     """Plan the rows for one shard. Shards carry no controls, so none are handled.
+
+    ``scheme="nested"`` (the original matrices): ``n_subsamples`` random
+    subsets with sizes spanning ``[min_cells_to_subsample, n)``, drawn
+    independently, so they overlap each other. ``scheme="disjoint"``: up to
+    ``n_subsamples`` non-overlapping pseudobulks of exactly ``replicate_cells``
+    cells each (:func:`~extract.de.arms.disjoint_replicates`). Both keep the
+    full row and label the extra rows ``<pert>__sub<k>``, so everything
+    downstream reads them the same way; ``row_plan.csv`` records the scheme.
 
     Returns ``(cell_index, labels, plan)`` over the shard's own cells, with
     subsampled cells repeated.
     """
+    if scheme not in ("nested", "disjoint"):
+        raise ValueError(f"scheme must be 'nested' or 'disjoint', got {scheme!r}")
     perturbations = np.asarray(perturbations).astype(str)
     rng = np.random.default_rng(seed)
     cell_index = [np.arange(len(perturbations))]
@@ -129,16 +141,19 @@ def plan_shard_rows(
     for pert in np.unique(perturbations):
         idx = np.flatnonzero(perturbations == pert)
         rows.append({"label": pert, "perturbation": pert, "variant": "full",
-                     "subsample": -1, "n_cells_planned": len(idx)})
-        for k, n in enumerate(
-            subsample_sizes(len(idx), n_subsamples, min_cells_to_subsample, spacing)
-        ):
-            chosen = rng.choice(idx, size=n, replace=False)
+                     "subsample": -1, "n_cells_planned": len(idx), "scheme": scheme})
+        if scheme == "disjoint":
+            groups = disjoint_replicates(idx, replicate_cells, n_subsamples, rng)
+        else:
+            groups = [rng.choice(idx, size=n, replace=False) for n in
+                      subsample_sizes(len(idx), n_subsamples, min_cells_to_subsample, spacing)]
+        for k, chosen in enumerate(groups):
+            n = len(chosen)
             label = f"{pert}{SUBSAMPLE_SEP}{k:02d}"
             cell_index.append(chosen)
             labels.append(np.full(n, label))
             rows.append({"label": label, "perturbation": pert, "variant": "subsample",
-                         "subsample": k, "n_cells_planned": n})
+                         "subsample": k, "n_cells_planned": n, "scheme": scheme})
 
     return np.concatenate(cell_index), np.concatenate(labels), pd.DataFrame(rows)
 
@@ -171,6 +186,8 @@ def compute_se_for_shard(
     chunk_perts: int | None = None,
     layer: str | None = None,
     keep_combined: bool = False,
+    scheme: str = "nested",
+    replicate_cells: int = 100,
     python: str | None = None,
 ) -> ShardResult:
     """Augment one shard, attach the control subset, run ``ComputeSE.py``.
@@ -211,6 +228,8 @@ def compute_se_for_shard(
         min_cells_to_subsample=min_cells_to_subsample,
         spacing=spacing,
         seed=context_seed(context, seed),
+        scheme=scheme,
+        replicate_cells=replicate_cells,
     )
     augmented = shard[cell_index].copy()
     augmented.obs = pd.DataFrame(

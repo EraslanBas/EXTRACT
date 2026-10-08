@@ -59,6 +59,12 @@ def build_parser() -> argparse.ArgumentParser:
                    help="labels per chunk file; default covers the whole shard "
                         "so ComputeSE.py writes one file per shard")
     p.add_argument("--seed", type=int, default=0)
+    p.add_argument("--scheme", choices=["nested", "disjoint"], default="nested",
+                   help="nested: subsamples of sizes spanning [50, n) (the original "
+                        "matrices); disjoint: up to --n-subsamples non-overlapping "
+                        "pseudobulks of --replicate-cells cells each")
+    p.add_argument("--replicate-cells", type=int, default=100,
+                   help="cells per pseudobulk with --scheme disjoint")
 
     p.add_argument("--shard-jobs", type=int, default=1,
                    help="shards to process concurrently (~43 GB each)")
@@ -103,6 +109,8 @@ def main() -> int:
             chunk_perts=args.chunk_perts,
             layer=args.layer,
             keep_combined=args.keep_combined,
+            scheme=args.scheme,
+            replicate_cells=args.replicate_cells,
         )
 
         todo = []

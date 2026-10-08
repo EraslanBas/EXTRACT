@@ -182,3 +182,16 @@ def test_permute_labels_only_names_observed_pairs():
         same = (out.perturbation_neg == out.perturbation) & \
                (out.context_neg == out.context)
         assert not same.any(), f"{strategy} kept {int(same.sum())} own labels"
+
+
+def test_disjoint_scheme_gives_non_overlapping_equal_size_pseudobulks():
+    from extract.de.shards import plan_shard_rows
+    p = np.array(["A"] * 350 + ["B"] * 1500 + ["C"] * 90)
+    cell_index, labels, plan = plan_shard_rows(p, 10, scheme="disjoint", replicate_cells=100, seed=1)
+    sub = plan[plan.variant == "subsample"]
+    assert set(sub.n_cells_planned) == {100}
+    assert sub.groupby("perturbation").size().to_dict() == {"A": 3, "B": 10}
+    for pert in ("A", "B"):
+        groups = [set(cell_index[labels == lab]) for lab in sub.label[sub.perturbation == pert]]
+        assert sum(len(a & b) for i, a in enumerate(groups) for b in groups[i + 1:]) == 0
+        assert all(g <= set(np.flatnonzero(p == pert)) for g in groups)
