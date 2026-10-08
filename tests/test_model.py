@@ -220,19 +220,6 @@ def test_fit_runs_with_the_distance_head(label_model):
     assert history[-1]["disc"] < history[0]["disc"]
 
 
-def test_distance_head_cell_terms_start_neutral_at_300_cells():
-    torch.manual_seed(0)
-    plain, cells = DistanceHead(4), DistanceHead(4, cell_terms=True)
-    z, zhat = torch.randn(5, 4), torch.randn(5, 4, 1)
-    ln = torch.full((5,), float(np.log(300.0)))
-    assert torch.allclose(plain(z, zhat), cells(z, zhat, ln), atol=1e-5)
-    with pytest.raises(ValueError):
-        cells(z, zhat)
-    # fewer cells -> larger noise variance -> smaller mismatch penalty
-    few = torch.full((5,), float(np.log(50.0)))
-    assert (cells.evidence(z, zhat, few).abs() <= cells.evidence(z, zhat, ln).abs() + 1e-6).all()
-
-
 def test_fit_runs_with_label_regularisation():
     X, p, c, s, n = _toy_dataset()
     cfg = TrainConfig(n_factors=5, epochs=4, batch_size=64, log_every=0, seed=0, head="distance",
@@ -936,9 +923,9 @@ def test_balance_negatives_matches_negative_count_to_positives():
 
     seen = {}
     orig = Extract.score
-    def spy(self, z, p_i, c_i, log_cells=None):
+    def spy(self, z, p_i, c_i):
         seen["n"] = seen.get("n", 0) + len(z)
-        return orig(self, z, p_i, c_i, log_cells)
+        return orig(self, z, p_i, c_i)
 
     for n_synth, expect_frac in ((n, 0.0), (n // 2, 0.5)):
         Xf = rng.normal(size=(n_synth, G)).astype(np.float32)
