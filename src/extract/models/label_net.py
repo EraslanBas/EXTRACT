@@ -40,6 +40,7 @@ class FactorizedLabelNet(nn.Module):
         n_basis: int,
         embedding_dim: int = 32,
         hidden: int = 128,
+        dropout: float = 0.0,
     ):
         super().__init__()
         self.n_factors = n_factors
@@ -51,14 +52,18 @@ class FactorizedLabelNet(nn.Module):
         nn.init.normal_(self.context_embedding.weight, std=0.02)
 
         out_dim = n_factors * n_basis
+        # dropout on the concatenated embeddings and the hidden layer:
+        # regularises against memorising the training pairs
         if hidden:
             self.head = nn.Sequential(
+                nn.Dropout(dropout),
                 nn.Linear(2 * embedding_dim, hidden),
                 nn.ReLU(),
+                nn.Dropout(dropout),
                 nn.Linear(hidden, out_dim),
             )
         else:
-            self.head = nn.Linear(2 * embedding_dim, out_dim)
+            self.head = nn.Sequential(nn.Dropout(dropout), nn.Linear(2 * embedding_dim, out_dim))
 
     def forward(
         self, perturbation_idx: torch.Tensor, context_idx: torch.Tensor

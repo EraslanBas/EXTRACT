@@ -184,6 +184,13 @@ def main() -> int:
     ap.add_argument("--axes-init", default="identity", choices=["identity", "random"],
                     help="fixed mode: start A at the identity or at a random rotation "
                          "(per seed); random adds _Arandom to the tag")
+    ap.add_argument("--no-distance-cells", action="store_true",
+                    help="distance head without the cell-count gain/noise terms "
+                         "(the first version); tags distance runs _dist instead of _distc")
+    ap.add_argument("--label-weight-decay", type=float, default=0.0,
+                    help="AdamW weight decay on the label network only; adds _lwd<x>")
+    ap.add_argument("--label-dropout", type=float, default=0.0,
+                    help="dropout in the MLP label network; adds _ldo<x>")
     ap.add_argument("--sparsity", type=float, default=0.0,
                    help="weight of the activity-sparsity penalty (0 = off); adds _sparse<w> to the tag")
     ap.add_argument("--head", default="statistics", choices=["statistics", "distance"],
@@ -301,7 +308,9 @@ def main() -> int:
                + ("" if head == ("linear", "square", "abs", "tanh") else f"_head-{'-'.join(head)}")
                + ("_Arandom" if args.axes_init == "random" and sub == "fixed" else "")
                + ("" if args.label_model == "mlp" else f"_{args.label_model}")
-               + ("_dist" if args.head == "distance" else "")
+               + (("_dist" if args.no_distance_cells else "_distc") if args.head == "distance" else "")
+               + (f"_lwd{args.label_weight_decay:g}" if args.label_weight_decay else "")
+               + (f"_ldo{args.label_dropout:g}" if args.label_dropout else "")
                + (f"_sparse{args.sparsity:g}" if args.sparsity else ""))
         # re-read each time: cheap, and means a cell finished by any earlier
         # or concurrent process is never repeated
@@ -328,7 +337,9 @@ def main() -> int:
                           min_epochs=args.min_epochs,
                           select_on=args.select_on, subspace=sub, basis=head,
                           axes_init=args.axes_init, label_model=args.label_model, head=args.head,
-                          sparsity=args.sparsity)
+                          sparsity=args.sparsity, distance_cells=not args.no_distance_cells,
+                          label_weight_decay=args.label_weight_decay,
+                          label_dropout=args.label_dropout)
         snaps: dict[int, np.ndarray] = {}
         model, hist = fit(config=cfg, train_rows=~val, val_rows=val,
                           is_real=is_real, synth_level=synth_level,
@@ -357,13 +368,16 @@ def main() -> int:
             return evaluate(model, Xt_, fa_["perturbation_idx"], fa_["context_idx"],
                             rows, s, np.random.default_rng(12345), ct_, wt_,
                             is_real=fa_["is_real"], recon_fake_weight=b,
-                            synth_level=fa_.get("synth_level"))
+                            synth_level=fa_.get("synth_level"),
+                            log_cells=np.log(fa_["n_cells"]))
 
         fa["is_real"] = is_real
         fa["synth_level"] = synth_level
         row = {"tag": tag, "d": d, "alpha": a, "beta": b, "K": K, "seed": seed,
                "subspace": sub, "head_basis": ",".join(head), "basis": (bname if named else ("V" if sub != "free" else "")),
                "label_model": args.label_model, "head": args.head, "sparsity": args.sparsity,
+               "distance_cells": not args.no_distance_cells,
+               "label_weight_decay": args.label_weight_decay, "label_dropout": args.label_dropout,
                "epochs_run": len(hist), "seconds": round(time.time()-t, 1)}
         for name, rows_ in (("train", np.nonzero(~val)[0]), ("val", np.nonzero(val)[0])):
             m = score(fa, rows_, X_t, col_t, w_t)

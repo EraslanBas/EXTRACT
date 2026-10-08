@@ -206,7 +206,7 @@ def main() -> None:
         m = evaluate(model, torch.from_numpy(fa["X"]), fa["perturbation_idx"],
                      fa["context_idx"], rows, sampler, np.random.default_rng(12345),
                      col_t, w_t, is_real=real_flags,
-                     recon_fake_weight=args.beta)
+                     recon_fake_weight=args.beta, log_cells=np.log(fa["n_cells"]))
         print(f"\n{name:<6} n={m['n_rows']:>7,}  acc {m['accuracy']:.4f}  "
               f"disc {m['disc']:.4f}  recon {m['recon']:.4f}  "
               f"span r median {m['span_residual_median']:.4f} "

@@ -30,9 +30,11 @@ the label-dependent natural parameters.
 
 from __future__ import annotations
 
+import math
 from typing import Sequence
 
 import torch
+import torch.nn.functional as F
 from torch import nn
 
 #: Scalar statistics applied coordinate-wise to ``z``.
@@ -131,10 +133,14 @@ class UnconstrainedHead(nn.Module):
         return self.net(flat).squeeze(-1)
 
 
+#: Reference cell count for the cell-count terms of :class:`DistanceHead`.
+LOG_CELLS_REF = math.log(300.0)
+
+
 class DistanceHead(nn.Module):
     """Score a row by how far its activities are from the label's prediction.
 
-        logit = b - sum_k (z_k - zhat_k(u))^2 / (2 sigma_k^2)
+        logit = b - sum_k (z_k - gamma(n) zhat_k(u))^2 / (2 sigma_k^2 s(n))
 
     ``lam`` here is the predicted activity ``zhat`` [batch, n_factors, 1], in
     the same units as ``z``: the label model says how active each program
@@ -144,20 +150,48 @@ class DistanceHead(nn.Module):
     a constant it is the Gaussian log-likelihood of ``z`` given the label,
     with one learned noise level ``sigma_k`` per factor. Separable in the
     components, like :class:`PerComponentHead`.
+
+    With ``cell_terms`` the row's cell count ``n`` enters in two places, both
+    learned functions of ``log n`` shared by all factors:
+
+    * ``gamma(n) = softplus(a + b (log n - log 300))`` scales the prediction.
+      ashr shrinks a row with fewer cells harder, so a pair's subsample rows
+      are faded copies of its full row; one ``zhat`` per pair cannot match
+      all of them without this.
+    * ``s(n) = exp(d (log n - log 300))`` scales the noise variance, which
+      falls with ``n`` (``d = -1`` without shrinkage, the starting value).
+
+    Both start neutral at ``n = 300`` (gamma = 1, s = 1). The gain depends on
+    the cell count only -- not on the row's values -- so it cannot stretch a
+    weak row to fit an arbitrary label.
     """
 
     n_basis = 1
 
-    def __init__(self, n_factors: int):
+    def __init__(self, n_factors: int, cell_terms: bool = False):
         super().__init__()
         self.log_sigma = nn.Parameter(torch.zeros(n_factors))
         self.bias = nn.Parameter(torch.zeros(1))
+        self.cell_terms = cell_terms
+        if cell_terms:
+            self.gain_a = nn.Parameter(torch.tensor(math.log(math.e - 1.0)))   # softplus = 1
+            self.gain_b = nn.Parameter(torch.zeros(()))
+            self.noise_d = nn.Parameter(torch.tensor(-1.0))
 
-    def evidence(self, z: torch.Tensor, lam: torch.Tensor) -> torch.Tensor:
+    def evidence(self, z: torch.Tensor, lam: torch.Tensor,
+                 log_cells: torch.Tensor | None = None) -> torch.Tensor:
         """``-e_k`` per factor, [batch, n_factors]."""
         if lam.shape != (*z.shape, 1):
             raise ValueError(f"lam has shape {tuple(lam.shape)}, expected {(*z.shape, 1)}")
-        return -(z - lam[..., 0]) ** 2 / (2 * torch.exp(2 * self.log_sigma))
+        zhat, var = lam[..., 0], torch.exp(2 * self.log_sigma)
+        if self.cell_terms:
+            if log_cells is None:
+                raise ValueError("this DistanceHead uses cell counts; pass log_cells")
+            u = (log_cells - LOG_CELLS_REF).unsqueeze(-1)
+            zhat = F.softplus(self.gain_a + self.gain_b * u) * zhat
+            var = var * torch.exp(self.noise_d * u)
+        return -(z - zhat) ** 2 / (2 * var)
 
-    def forward(self, z: torch.Tensor, lam: torch.Tensor) -> torch.Tensor:
-        return self.evidence(z, lam).sum(dim=1) + self.bias
+    def forward(self, z: torch.Tensor, lam: torch.Tensor,
+                log_cells: torch.Tensor | None = None) -> torch.Tensor:
+        return self.evidence(z, lam, log_cells).sum(dim=1) + self.bias

@@ -132,6 +132,17 @@ class TrainConfig:
     #: activities zhat (``basis`` is then unused). See models.heads.
     head: str = "statistics"
 
+    #: Distance head only: let the row's cell count scale the prediction
+    #: (ashr fades rows with fewer cells) and the noise variance. See
+    #: models.heads.DistanceHead.
+    distance_cells: bool = True
+
+    #: Regularisation of the label network against memorising training pairs:
+    #: decoupled (AdamW) weight decay on its parameters only, and dropout on
+    #: its embeddings and hidden layer (MLP label model). 0 = off.
+    label_weight_decay: float = 0.0
+    label_dropout: float = 0.0
+
     #: Weight rho of the activity-sparsity penalty,
     #: rho * sum_k mean_rows |z_k| / sd(z_k), over the batch's measured
     #: full-data rows. Each perturbation should engage few programs; mixing the
@@ -220,7 +231,7 @@ class Extract(nn.Module):
         if config.head == "distance":
             if config.unconstrained_head:
                 raise ValueError("unconstrained_head is an ablation of the statistics head")
-            self.head = DistanceHead(config.n_factors)
+            self.head = DistanceHead(config.n_factors, cell_terms=config.distance_cells)
         else:
             self.head = (
                 UnconstrainedHead(config.n_factors, len(config.basis))
@@ -240,6 +251,7 @@ class Extract(nn.Module):
                 n_basis=n_basis,
                 embedding_dim=config.embedding_dim,
                 hidden=config.label_hidden,
+                dropout=config.label_dropout,
             )
         else:
             raise ValueError(f"label_model must be 'mlp', 'product' or 'ammi', got {config.label_model!r}")
@@ -257,15 +269,21 @@ class Extract(nn.Module):
         z: torch.Tensor,
         perturbation_idx: torch.Tensor,
         context_idx: torch.Tensor,
+        log_cells: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        """``s(x, u) = sum_k psi_k(z_k, u) + b`` -- eq. (7)."""
-        return self.head(z, self.label_net(perturbation_idx, context_idx))
+        """``s(x, u) = sum_k psi_k(z_k, u) + b`` -- eq. (7). ``log_cells``
+        [batch] is used only by a distance head with cell terms."""
+        lam = self.label_net(perturbation_idx, context_idx)
+        if isinstance(self.head, DistanceHead):
+            return self.head(z, lam, log_cells)
+        return self.head(z, lam)
 
     def component_evidence(
         self,
         z: torch.Tensor,
         perturbation_idx: torch.Tensor,
         context_idx: torch.Tensor,
+        log_cells: torch.Tensor | None = None,
     ) -> torch.Tensor:
         """``psi_k`` per factor -- [batch, n_factors]. The per-factor evidence
         of table 2, not a per-factor decision: these are summed before any
@@ -274,7 +292,7 @@ class Extract(nn.Module):
             raise TypeError("the unconstrained head has no per-component terms")
         lam = self.label_net(perturbation_idx, context_idx)
         if isinstance(self.head, DistanceHead):
-            return self.head.evidence(z, lam)
+            return self.head.evidence(z, lam, log_cells)
         return (lam * self.head.statistics(z)).sum(dim=-1)
 
     @property
@@ -475,6 +493,7 @@ def fit(
     w_t = torch.from_numpy(w.astype(np.float32)).to(device)
     real_t = torch.from_numpy(is_real).to(device)
     full_t = torch.from_numpy(stratum == 0).to(device)
+    logn_t = torch.from_numpy(np.log(n_cells).astype(np.float32)).to(device)
     p_all = torch.from_numpy(perturbation_idx).to(device)
     c_all = torch.from_numpy(context_idx).to(device)
     if target_col is None or config.no_mask:
@@ -482,9 +501,20 @@ def fit(
     else:
         col_t = torch.from_numpy(np.asarray(target_col, dtype=np.int64)).to(device)
 
-    optimiser = torch.optim.Adam(
-        model.parameters(), lr=config.lr, weight_decay=config.weight_decay
-    )
+    if config.label_weight_decay:
+        label_params = set(map(id, model.label_net.parameters()))
+        optimiser = torch.optim.AdamW([
+            {"params": [p for p in model.parameters() if id(p) not in label_params],
+             "weight_decay": 0.0},
+            {"params": list(model.label_net.parameters()),
+             "weight_decay": config.label_weight_decay},
+        ], lr=config.lr)
+        if config.weight_decay:
+            raise ValueError("weight_decay and label_weight_decay together are not supported")
+    else:
+        optimiser = torch.optim.Adam(
+            model.parameters(), lr=config.lr, weight_decay=config.weight_decay
+        )
 
     tc_disc = tc_opt = None
     if config.tc_weight > 0:
@@ -549,13 +579,14 @@ def fit(
             # label mismatch, it has to judge whether the vector is a plausible
             # response for that label at all.
             if all_real:
-                pos = model.score(z, p_all[rows_t], c_all[rows_t])
-                neg = model.score(z, neg_p_t, neg_c_t)
+                ln = logn_t[rows_t]
+                pos = model.score(z, p_all[rows_t], c_all[rows_t], ln)
+                neg = model.score(z, neg_p_t, neg_c_t, ln)
             else:
                 pos_l, neg_l = [], []
                 if bool(keep.any()):
                     pos_l.append(model.score(z[keep], p_all[rows_t][keep],
-                                             c_all[rows_t][keep]))
+                                             c_all[rows_t][keep], logn_t[rows_t][keep]))
                     # Thin the permuted negatives so the two kinds together
                     # match the positives one for one. `p_keep_perm` is derived
                     # from the GLOBAL counts, not this batch, so the ratio is
@@ -567,10 +598,10 @@ def fit(
                         kidx = kidx[take]
                     if len(kidx):
                         neg_l.append(model.score(z[kidx], neg_p_t[kidx],
-                                                 neg_c_t[kidx]))
+                                                 neg_c_t[kidx], logn_t[rows_t][kidx]))
                 if bool(synth.any()):
                     neg_l.append(model.score(z[synth], p_all[rows_t][synth],
-                                             c_all[rows_t][synth]))
+                                             c_all[rows_t][synth], logn_t[rows_t][synth]))
                 pos = torch.cat(pos_l) if pos_l else torch.zeros(0, device=device)
                 neg = torch.cat(neg_l) if neg_l else torch.zeros(0, device=device)
             real, fake = pos, neg
@@ -684,6 +715,7 @@ def fit(
                         is_real=is_real,
                         recon_fake_weight=config.recon_fake_weight,
                         synth_level=synth_level,
+                        log_cells=logn_t,
                     ).items()
                 }
             )
@@ -764,6 +796,7 @@ def evaluate(
     recon_fake_weight: float = 0.0,
     batch_size: int = 2048,
     synth_level: np.ndarray | None = None,
+    log_cells: torch.Tensor | np.ndarray | None = None,
 ) -> dict:
     """Metrics on held-out rows, scored exactly as training scores them.
 
@@ -830,6 +863,14 @@ def evaluate(
     )
     if not real_rows.any():
         raise ValueError("no measured rows to evaluate")
+    if log_cells is not None:
+        log_cells = torch.as_tensor(np.asarray(log_cells.cpu() if torch.is_tensor(log_cells) else log_cells),
+                                    dtype=torch.float32)
+        if len(log_cells) != len(X_t):
+            raise ValueError(f"log_cells has {len(log_cells)} entries, X has {len(X_t)} rows")
+
+    def _ln(idx):
+        return None if log_cells is None else log_cells[torch.from_numpy(idx)].to(device)
 
     def _bce_sum(logits: torch.Tensor, target: float) -> float:
         return float(F.binary_cross_entropy_with_logits(
@@ -862,12 +903,14 @@ def evaluate(
                 z,
                 torch.from_numpy(perturbation_idx[idx]).to(device),
                 torch.from_numpy(context_idx[idx]).to(device),
+                _ln(idx),
             )
             neg_p, neg_c = sampler.sample(local_real, rng)
             perm = model.score(
                 z,
                 torch.from_numpy(neg_p).to(device),
                 torch.from_numpy(neg_c).to(device),
+                _ln(idx),
             )
             t["pos_ok"] += float((pos > 0).sum())
             t["pos_bce"] += _bce_sum(pos, 1.0)
@@ -894,6 +937,7 @@ def evaluate(
                 z,
                 torch.from_numpy(perturbation_idx[idx]).to(device),
                 torch.from_numpy(context_idx[idx]).to(device),
+                _ln(idx),
             )
             t["syn_ok"] += float((syn <= 0).sum())
             t["syn_bce"] += _bce_sum(syn, 0.0)
