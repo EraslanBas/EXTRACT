@@ -175,7 +175,7 @@ def run_fit(a, X, pi, ci, st, nc, tr, va, seed, **kw):
                       select_on="accuracy", seed=seed, log_every=0, noise_rank=a.noise_rank,
                       head=a.head, sparsity=a.sparsity, **kw)
     with contextlib.redirect_stdout(io.StringIO()):
-        model, hist = fit(X, pi, ci, st, nc, config=cfg, train_rows=tr, val_rows=va)
+        model, hist = fit(X, pi, ci, config=cfg, train_rows=tr, val_rows=va)
     best = max((h for h in hist if "val_accuracy" in h), key=lambda h: h["val_accuracy"])
     return model, best
 

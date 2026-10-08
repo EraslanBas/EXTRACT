@@ -43,7 +43,6 @@ from extract.data.splits import (
     thin_synthetic,
 )
 from extract.objectives import DEFAULT_WEIGHTS, StratifiedNegativeSampler
-from extract.objectives.reconstruction import precision_weights
 from extract.train import TrainConfig, encode, evaluate, fit, prepare
 
 
@@ -195,14 +194,13 @@ def main() -> None:
         sampler = StratifiedNegativeSampler(
             perturbation_idx=fa["perturbation_idx"][rows],
             context_idx=fa["context_idx"][rows],
-            stratum=fa["stratum"][rows],
+            stratum=np.zeros(len(rows), dtype=np.int64),
             n_perturbations=len(pert_levels), n_contexts=len(ctx_levels),
             weights=dict(DEFAULT_WEIGHTS),
         )
         col_t = (torch.from_numpy(fa["target_col"])
                  if fa["target_col"] is not None else None)
-        w_t = torch.from_numpy(precision_weights(
-            fa["n_cells"], scheme=config.weight_scheme).astype(np.float32))
+        w_t = None                                    # every row weighs the same
         m = evaluate(model, torch.from_numpy(fa["X"]), fa["perturbation_idx"],
                      fa["context_idx"], rows, sampler, np.random.default_rng(12345),
                      col_t, w_t, is_real=real_flags,

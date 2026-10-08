@@ -72,7 +72,7 @@ def main():
                           select_on="accuracy", seed=seed, log_every=0, subspace="frozen",
                           label_model=a.label_model, head=a.head)
         with contextlib.redirect_stdout(io.StringIO()):
-            _, hist = fit(X, pi, ci, st, nc, config=cfg, train_rows=tr, val_rows=va,
+            _, hist = fit(X, pi, ci, config=cfg, train_rows=tr, val_rows=va,
                           subspace_basis=basis.astype(np.float32))
         return max(h["val_accuracy"] for h in hist if "val_accuracy" in h)
 

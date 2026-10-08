@@ -28,7 +28,6 @@ from extract.data.splits import (_pair_key, load_partition,
                                        split_val_per_perturbation,
                                        subsample_mask, thin_synthetic)
 from extract.objectives import StratifiedNegativeSampler
-from extract.objectives.reconstruction import precision_weights
 from extract.train import TrainConfig, evaluate, fit, prepare
 
 METRICS = ("disc", "recon", "recon_measured", "recon_synth", "accuracy",
@@ -262,21 +261,22 @@ def main() -> int:
     # ---- noise model and label-driven subspaces (train pairs only) -----
     noise_model, bases = None, {}
     if set(args.subspace) - {"free"}:
-        from extract.data.noise import label_subspace, noise_covariance, subsample_residuals
+        from extract.data.noise import (label_subspace, noise_covariance, pair_means,
+                                        within_pair_residuals)
         t1 = time.time()
         train_real = real & ~val_all
-        R = subsample_residuals(Xtv, mtv, train_real, max_rows=args.noise_max_rows,
-                                seed=args.draw_seed)
+        pair = (mtv.perturbation.astype(str) + "|" + mtv.context.astype(str)).to_numpy()
+        R = within_pair_residuals(Xtv, pair, train_real, max_rows=args.noise_max_rows,
+                                  seed=args.draw_seed)
         noise_model = noise_covariance(R, rank=args.noise_rank, seed=args.draw_seed)
         del R
-        full = train_real & (mtv.variant == "main").to_numpy()
+        _, means, counts = pair_means(Xtv, pair, train_real)
         for d_ in sorted(set(args.d)):
-            bases[d_], ev = label_subspace(Xtv[full], mtv.n_cells.to_numpy()[full],
-                                           noise_model, d_)
+            bases[d_], ev = label_subspace(means, counts, noise_model, d_)
             np.save(args.out_dir / f"subspace_V_d{d_}.npy", bases[d_])
         np.savez(args.out_dir / "noise_model.npz", diag=noise_model.diag,
                  U=noise_model.U, s=noise_model.s)
-        print(f"noise model rank {args.noise_rank} from train-pair subsamples; "
+        print(f"noise model rank {args.noise_rank} from within-pair spread of train pairs; "
               f"label subspaces for d={sorted(bases)}  ({time.time()-t1:.0f}s)", flush=True)
 
     # NAME=PATH loads external axes; a bare "V" means the label-driven subspace
@@ -351,13 +351,13 @@ def main() -> int:
                  B=np.stack([snaps[e] for e in ep]).astype(np.float32))
 
         X_t = torch.from_numpy(fa["X"]); col_t = torch.from_numpy(fa["target_col"])
-        w_t = torch.from_numpy(precision_weights(fa["n_cells"]).astype(np.float32))
+        w_t = None                                    # every row weighs the same
 
         def score(fa_, rows, Xt_, ct_, wt_):
             s = StratifiedNegativeSampler(
                 perturbation_idx=fa_["perturbation_idx"][rows],
                 context_idx=fa_["context_idx"][rows],
-                stratum=fa_["stratum"][rows],
+                stratum=np.zeros(len(rows), dtype=np.int64),
                 n_perturbations=int(fa_["perturbation_idx"].max())+1,
                 n_contexts=int(fa_["context_idx"].max())+1,
                 weights={"same_s_other_pert":0.5,"same_s_other_context":0.5})
@@ -387,7 +387,7 @@ def main() -> int:
             m = score(fte, np.arange(len(mte)),
                       torch.from_numpy(fte["X"]),
                       torch.from_numpy(fte["target_col"]),
-                      torch.from_numpy(precision_weights(fte["n_cells"]).astype(np.float32)))
+                      None)
             for k in METRICS + tuple(k for k in m if k.startswith(("synth_accuracy_f", "recon_synth_f"))):
                 row[f"test_{k}"] = m.get(k)
         records.append(row)

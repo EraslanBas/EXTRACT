@@ -28,7 +28,6 @@ from .objectives import (
     StratifiedNegativeSampler,
     contrastive_loss,
     discrimination_accuracy,
-    precision_weights,
     weighted_squared_error,
 )
 from .objectives.total_correlation import (
@@ -57,9 +56,6 @@ class TrainConfig:
     #: discriminate well but carry no interpretable gene program; too high and
     #: the model collapses to PCA and stops responding to the label.
     alpha: float = 1.0
-
-    #: Precision weighting of the reconstruction term: "linear" is w ~ n_cells.
-    weight_scheme: str = "linear"
 
     #: Thin the label-permuted negatives so that
     #: ``|permuted| + |synthetic| == |positives|``, i.e. one negative per
@@ -140,7 +136,7 @@ class TrainConfig:
 
     #: Weight rho of the activity-sparsity penalty,
     #: rho * sum_k mean_rows |z_k| / sd(z_k), over the batch's measured
-    #: full-data rows. Each perturbation should engage few programs; mixing the
+    #: rows. Each perturbation should engage few programs; mixing the
     #: axes spreads every response over many factors, so the penalty prefers
     #: the true axes. Dividing by each factor's spread (kept in the graph)
     #: stops A from lowering it by rescaling a factor. 0 = off.
@@ -300,8 +296,6 @@ def fit(
     X: np.ndarray,
     perturbation_idx: np.ndarray,
     context_idx: np.ndarray,
-    stratum: np.ndarray,
-    n_cells: np.ndarray,
     target_col: np.ndarray | None = None,
     config: TrainConfig | None = None,
     train_rows: np.ndarray | None = None,
@@ -321,12 +315,10 @@ def fit(
         scale the gene axis: ``ashr`` has already placed every entry on a
         common log-fold-change scale, and dividing by per-gene SD would remove
         exactly that and promote low-variance genes to equal footing.
-    stratum
-        [n_rows] subsample index ``s`` in ``0..10`` (0 = the full-data row).
-        Required: the negative sampler stratifies on it, and without that the
-        discriminator wins on noise scale.
-    n_cells
-        [n_rows] cells behind each estimate. Drives the precision weight.
+
+        The model sees only ``X`` and the labels. All measured rows of a pair
+        are exchangeable estimates of the same response: no cell counts, no
+        subsample index, and no row is treated as the most precise.
     is_real
         [n_rows] bool: is this row an actual *measured* response vector?
         Defaults to all-True.
@@ -384,15 +376,11 @@ def fit(
     X = np.asarray(X, dtype=np.float32)
     perturbation_idx = np.asarray(perturbation_idx, dtype=np.int64)
     context_idx = np.asarray(context_idx, dtype=np.int64)
-    stratum = np.asarray(stratum, dtype=np.int64)
-    n_cells = np.asarray(n_cells, dtype=np.float64)
     n_rows, n_genes = X.shape
 
     for name, arr in (
         ("perturbation_idx", perturbation_idx),
         ("context_idx", context_idx),
-        ("stratum", stratum),
-        ("n_cells", n_cells),
     ):
         if len(arr) != n_rows:
             raise ValueError(f"{name} has {len(arr)} entries, X has {n_rows} rows")
@@ -429,7 +417,7 @@ def fit(
                 raise ValueError("no real rows: L_recon would have nothing to fit")
         from .data.noise import label_subspace_from_rows
         subspace_basis, nm = label_subspace_from_rows(
-            X, perturbation_idx, context_idx, stratum, n_cells, train_idx,
+            X, perturbation_idx, context_idx, train_idx,
             d=config.n_factors, rank=config.noise_rank,
             max_rows=config.noise_max_rows, seed=config.seed, is_real=is_real)
         noise_model = noise_model if noise_model is not None else nm
@@ -454,7 +442,7 @@ def fit(
         return StratifiedNegativeSampler(
             perturbation_idx=perturbation_idx[rows],
             context_idx=context_idx[rows],
-            stratum=stratum[rows],
+            stratum=np.zeros(len(rows), dtype=np.int64),   # rows are exchangeable
             n_perturbations=n_perturbations,
             n_contexts=n_contexts,
             weights=weights,
@@ -466,7 +454,7 @@ def fit(
     sampler = _sampler(train_idx)
     eval_sampler = _sampler(val_idx) if val_idx is not None else None
 
-    w = precision_weights(n_cells, scheme=config.weight_scheme)
+    w = np.ones(n_rows)                     # every row weighs the same
     if is_real is None:
         is_real = np.ones(n_rows, dtype=bool)
     else:
@@ -481,7 +469,6 @@ def fit(
     X_t = torch.from_numpy(X).to(device)
     w_t = torch.from_numpy(w.astype(np.float32)).to(device)
     real_t = torch.from_numpy(is_real).to(device)
-    full_t = torch.from_numpy(stratum == 0).to(device)
     p_all = torch.from_numpy(perturbation_idx).to(device)
     c_all = torch.from_numpy(context_idx).to(device)
     if target_col is None or config.no_mask:
@@ -638,7 +625,7 @@ def fit(
 
             loss_s = torch.zeros((), device=device)
             if config.sparsity:
-                zf = z[keep & full_t[rows_t]]
+                zf = z[keep]
                 if len(zf) > 1:
                     loss_s = (zf.abs() / (zf.std(0) + 1e-8)).mean(0).sum()
                     loss = loss + config.sparsity * loss_s
@@ -979,9 +966,9 @@ def prepare(
     """Turn ``(X, meta)`` from :func:`extract.de.load_matrices` into
     :func:`fit` arguments.
 
-    ``meta`` needs ``perturbation``, ``context``, ``label`` and ``n_cells``.
-    The stratum is read off the ``__subNN`` suffix of ``label``: the full-data
-    row has no suffix and becomes stratum 0.
+    ``meta`` needs ``perturbation`` and ``context`` (and ``label`` only through
+    the caller's choice of rows). Cell counts and subsample indices are not
+    passed on: the model sees the matrix and the labels only.
 
     Pass ``perturbation_levels`` / ``context_levels`` from a previous call to
     encode a second row set (the test partition) with the **same** indices, so
@@ -1008,17 +995,10 @@ def prepare(
     pert_codes, pert_levels = _encode(perturbations, perturbation_levels, "perturbations")
     ctx_codes, ctx_levels = _encode(contexts, context_levels, "contexts")
 
-    stratum = np.zeros(len(labels), dtype=np.int64)
-    for i, lab in enumerate(labels):
-        if "__sub" in lab:
-            stratum[i] = int(lab.split("__sub")[-1]) + 1
-
     out = {
         "X": np.asarray(X, dtype=np.float32),
         "perturbation_idx": pert_codes.astype(np.int64),
         "context_idx": ctx_codes.astype(np.int64),
-        "stratum": stratum,
-        "n_cells": meta["n_cells"].to_numpy(),
         "target_col": (
             on_target_index(perturbations, genes) if mask_on_target else None
         ),

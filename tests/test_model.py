@@ -215,7 +215,7 @@ def test_fit_runs_with_the_distance_head(label_model):
     X, p, c, s, n = _toy_dataset()
     cfg = TrainConfig(n_factors=5, epochs=6, batch_size=64, log_every=0, seed=0,
                       label_model=label_model, head="distance", noise_rank=3)
-    model, history = fit(X, p, c, s, n, target_col=None, config=cfg)
+    model, history = fit(X, p, c, target_col=None, config=cfg)
     assert isinstance(model.head, DistanceHead)
     assert history[-1]["disc"] < history[0]["disc"]
 
@@ -224,7 +224,7 @@ def test_fit_runs_with_label_regularisation():
     X, p, c, s, n = _toy_dataset()
     cfg = TrainConfig(n_factors=5, epochs=4, batch_size=64, log_every=0, seed=0, head="distance",
                       noise_rank=3, label_weight_decay=1e-2, label_dropout=0.2)
-    model, history = fit(X, p, c, s, n, target_col=None, config=cfg)
+    model, history = fit(X, p, c, target_col=None, config=cfg)
     assert any(isinstance(m, torch.nn.Dropout) for m in model.label_net.modules())
     assert np.isfinite(history[-1]["disc"])
 
@@ -233,7 +233,7 @@ def test_sparsity_penalty_runs_and_is_logged():
     X, p, c, s, n = _toy_dataset()
     cfg = TrainConfig(n_factors=5, epochs=4, batch_size=64, log_every=0, seed=0,
                       head="distance", sparsity=0.1, noise_rank=3, axes_init="random")
-    model, history = fit(X, p, c, s, n, target_col=None, config=cfg)
+    model, history = fit(X, p, c, target_col=None, config=cfg)
     assert all(h["sparsity"] > 0 for h in history)
 
 
@@ -242,7 +242,7 @@ def test_fit_runs_with_a_structured_label_model(label_model):
     X, p, c, s, n = _toy_dataset()
     cfg = TrainConfig(n_factors=5, epochs=6, batch_size=64, log_every=0, seed=0,
                       label_model=label_model, noise_rank=3)
-    model, history = fit(X, p, c, s, n, target_col=None, config=cfg)
+    model, history = fit(X, p, c, target_col=None, config=cfg)
     assert isinstance(model.label_net, ProductLabelNet)
     assert isinstance(model.label_net, AMMILabelNet) == (label_model == "ammi")
     assert history[-1]["disc"] < history[0]["disc"]
@@ -451,7 +451,7 @@ def _toy_dataset(n_pert=20, n_ctx=3, n_strata=4, n_genes=60, d_true=5, seed=0):
 def test_fit_runs_and_reduces_both_terms():
     X, p, c, s, n = _toy_dataset()
     cfg = TrainConfig(subspace="free", n_factors=5, epochs=12, batch_size=64, log_every=0, seed=0)
-    model, history = fit(X, p, c, s, n, target_col=None, config=cfg)
+    model, history = fit(X, p, c, target_col=None, config=cfg)
 
     assert len(history) == 12
     assert history[-1]["recon"] < history[0]["recon"]
@@ -466,15 +466,15 @@ def test_fit_accepts_a_mask_and_custom_negative_weights():
         n_factors=4, epochs=4, batch_size=48, log_every=0,
         negative_weights={"same_s_other_pert": 0.8, "same_s_other_context": 0.2},
     )
-    model, history = fit(X, p, c, s, n, target_col=target_col, config=cfg)
+    model, history = fit(X, p, c, target_col=target_col, config=cfg)
     assert np.isfinite(history[-1]["recon"])
     assert model.loading_matrix().shape == (4, 40)
 
 
 def test_fit_rejects_mismatched_array_lengths():
     X, p, c, s, n = _toy_dataset(n_pert=6, n_genes=20)
-    with pytest.raises(ValueError, match="stratum"):
-        fit(X, p, c, s[:-1], n, config=TrainConfig(epochs=1, log_every=0))
+    with pytest.raises(ValueError, match="context_idx"):
+        fit(X, p, c[:-1], config=TrainConfig(epochs=1, log_every=0))
 
 
 def test_optional_tc_term_runs():
@@ -482,7 +482,7 @@ def test_optional_tc_term_runs():
     cfg = TrainConfig(
         n_factors=4, epochs=3, batch_size=32, log_every=0, tc_weight=0.1
     )
-    _, history = fit(X, p, c, s, n, config=cfg)
+    _, history = fit(X, p, c, config=cfg)
     assert history[-1]["tc"] != 0.0
 
 
@@ -544,7 +544,7 @@ def test_fit_trains_only_on_train_rows():
     cfg = TrainConfig(n_factors=4, epochs=4, batch_size=32, log_every=0,
                       eval_every=2, patience=0)
     model, history = fit(
-        X, p, c, s, n, config=cfg,
+        X, p, c, config=cfg,
         train_rows=split.train, val_rows=split.test,
     )
     assert "val_accuracy" in history[-1]
@@ -567,7 +567,7 @@ def test_fit_rejects_a_split_smaller_than_one_batch():
     train = np.zeros(len(X), dtype=bool)
     train[:10] = True
     with pytest.raises(ValueError, match="training rows"):
-        fit(X, p, c, s, n, config=TrainConfig(batch_size=256, epochs=1,
+        fit(X, p, c, config=TrainConfig(batch_size=256, epochs=1,
                                               log_every=0),
             train_rows=train)
 
@@ -579,7 +579,7 @@ def test_evaluate_returns_the_documented_keys():
     X, p, c, s, n = _toy_dataset(n_pert=10, n_ctx=3, n_strata=3, n_genes=30)
     cfg = TrainConfig(n_factors=4, epochs=2, batch_size=32, log_every=0,
                       eval_every=0)
-    model, _ = fit(X, p, c, s, n, config=cfg)
+    model, _ = fit(X, p, c, config=cfg)
 
     rows = np.arange(min(200, len(X)))
     sampler = StratifiedNegativeSampler(
@@ -606,7 +606,7 @@ def test_evaluate_never_scores_synthetic_rows_as_positives():
     X, p, c, s, n = _toy_dataset(n_pert=10, n_ctx=3, n_strata=3, n_genes=30)
     cfg = TrainConfig(n_factors=4, epochs=2, batch_size=32, log_every=0,
                       eval_every=0)
-    model, _ = fit(X, p, c, s, n, config=cfg)
+    model, _ = fit(X, p, c, config=cfg)
 
     k = min(200, len(X))
     rng = np.random.default_rng(1)
@@ -688,7 +688,7 @@ def test_early_stopping_restores_the_best_epoch():
     for metric, pick in (("accuracy", max), ("total", min)):
         cfg = TrainConfig(n_factors=4, epochs=30, batch_size=32, log_every=0,
                           eval_every=1, patience=2, seed=0, select_on=metric)
-        model, history = fit(X, p, c, s, n, config=cfg,
+        model, history = fit(X, p, c, config=cfg,
                              train_rows=split.train, val_rows=split.val)
         key = f"val_{metric}"
         evaluated = [h for h in history if key in h]
@@ -708,7 +708,7 @@ def test_total_is_the_objective_on_both_train_and_val():
     alpha = 700.0
     cfg = TrainConfig(n_factors=4, alpha=alpha, epochs=6, batch_size=32,
                       log_every=0, eval_every=1, patience=0, seed=0)
-    _, history = fit(X, p, c, s, n, config=cfg,
+    _, history = fit(X, p, c, config=cfg,
                      train_rows=split.train, val_rows=split.val)
     for h in history:
         assert abs(h["total"] - (h["disc"] + alpha * h["recon"])) < 1e-6
@@ -723,7 +723,7 @@ def test_fit_rejects_overlapping_train_and_val():
     mask = np.zeros(len(X), dtype=bool)
     mask[:] = True
     with pytest.raises(ValueError, match="overlap"):
-        fit(X, p, c, s, n, config=TrainConfig(epochs=1, batch_size=32,
+        fit(X, p, c, config=TrainConfig(epochs=1, batch_size=32,
                                               log_every=0),
             train_rows=mask, val_rows=mask)
 
@@ -769,13 +769,13 @@ def test_is_real_false_rows_are_excluded_from_reconstruction():
     cfg = TrainConfig(n_factors=3, epochs=2, batch_size=64, seed=0,
                       log_every=0, eval_every=0, patience=0)
 
-    m_ref, _ = fit(X, p, c, s, cells, config=cfg)
+    m_ref, _ = fit(X, p, c, config=cfg)
 
     fake = (rng.normal(size=(n, G)) * 50).astype(np.float32)   # wildly off-scale
     X2 = np.vstack([X, fake])
     pad = lambda a: np.concatenate([a, a])
     real_flag = np.concatenate([np.ones(n, bool), np.zeros(n, bool)])
-    m_gated, _ = fit(X2, pad(p), pad(c), pad(s), pad(cells),
+    m_gated, _ = fit(X2, pad(p), pad(c),
                      config=cfg, is_real=real_flag)
 
     # Not bit-identical (batching differs), but the gate must keep B finite and
@@ -794,9 +794,9 @@ def test_is_real_rejects_bad_input():
     cfg = TrainConfig(n_factors=2, epochs=1, batch_size=64, log_every=0,
                       eval_every=0, patience=0)
     with pytest.raises(ValueError, match="is_real has"):
-        fit(X, *a, config=cfg, is_real=np.ones(n - 1, bool))
+        fit(X, *a[:2], config=cfg, is_real=np.ones(n - 1, bool))
     with pytest.raises(ValueError, match="no real rows"):
-        fit(X, *a, config=cfg, is_real=np.zeros(n, bool))
+        fit(X, *a[:2], config=cfg, is_real=np.zeros(n, bool))
 
 
 def test_negatives_never_name_a_held_out_pair():
@@ -848,7 +848,7 @@ def test_synthetic_rows_are_negatives_for_L_disc_and_signed_in_L_recon():
         cfg = TrainConfig(n_factors=3, epochs=2, batch_size=128, seed=0,
                           log_every=0, eval_every=0, patience=0,
                           recon_fake_weight=beta)
-        m, hist = fit(Xb, dbl(p), dbl(c), dbl(st), dbl(cells),
+        m, hist = fit(Xb, dbl(p), dbl(c),
                       config=cfg, is_real=flag)
         B = m.loading_matrix()
         assert np.isfinite(B).all(), f"beta={beta}: non-finite B"
@@ -871,7 +871,7 @@ def test_recon_fake_weight_changes_the_objective():
         cfg = TrainConfig(subspace="free", n_factors=3, epochs=3, batch_size=128, seed=0,
                           log_every=0, eval_every=0, patience=0,
                           recon_fake_weight=beta)
-        m, _ = fit(np.vstack([X, fake]), *[dbl(v) for v in a],
+        m, _ = fit(np.vstack([X, fake]), *[dbl(v) for v in a[:2]],
                    config=cfg, is_real=flag)
         out[beta] = m.loading_matrix()
     assert not np.allclose(out[0.0], out[1.0]), "recon_fake_weight had no effect"
@@ -936,7 +936,7 @@ def test_balance_negatives_matches_negative_count_to_positives():
         seen.clear()
         Extract.score = spy
         try:
-            fit(np.vstack([X, Xf]), *[cat(v) for v in a], config=cfg, is_real=flag)
+            fit(np.vstack([X, Xf]), *[cat(v) for v in a[:2]], config=cfg, is_real=flag)
         finally:
             Extract.score = orig
         # scored = positives(n) + permuted(~expect_frac*n) + synthetic(n_synth)
@@ -955,7 +955,7 @@ def test_balance_negatives_is_inert_without_synthetic_rows():
         cfg = TrainConfig(n_factors=3, epochs=2, batch_size=128, seed=0,
                           log_every=0, eval_every=0, patience=0,
                           balance_negatives=bal)
-        m, _ = fit(X, *a, config=cfg)
+        m, _ = fit(X, *a[:2], config=cfg)
         Bs.append(m.loading_matrix())
     assert np.allclose(Bs[0], Bs[1])
 
@@ -1021,7 +1021,7 @@ def test_min_epochs_keeps_training_but_still_restores_the_best_epoch():
     split = make_split(meta, level="pair", test_frac=0.12, val_frac=0.12, seed=0)
     cfg = TrainConfig(n_factors=4, epochs=40, batch_size=32, log_every=0,
                       eval_every=1, patience=1, min_epochs=25, seed=0)
-    _, history = fit(X, p, c, s, n, config=cfg,
+    _, history = fit(X, p, c, config=cfg,
                      train_rows=split.train, val_rows=split.val)
     assert len(history) >= 25, len(history)
     ev = [h for h in history if "val_total" in h]
@@ -1040,7 +1040,7 @@ def test_on_eval_snapshots_B_at_every_evaluation():
     cfg = TrainConfig(n_factors=4, epochs=10, batch_size=32, log_every=0,
                       eval_every=3, patience=0, select_on="accuracy", seed=0)
     snaps = {}
-    model, history = fit(X, p, c, s, n, config=cfg,
+    model, history = fit(X, p, c, config=cfg,
                          train_rows=split.train, val_rows=split.val,
                          on_eval=lambda ep, m: snaps.__setitem__(
                              ep, m.loading_matrix().copy()))
