@@ -354,8 +354,45 @@ scale does not depend on $G$.
 
 The label network maps $(p, c)$ to coefficients
 $\boldsymbol\lambda \in \mathbb R^{d \times J}$. It concatenates a perturbation
-embedding $e_p$ and a context embedding $e_c$ (32 dimensions each) and passes
-them through `Linear(64, 128) → ReLU → Linear(128, d·J)`.
+embedding $e_p$ and a context embedding $e_c$ (32 dimensions each by default)
+and passes them through `Linear(64, 128) → ReLU → Linear(128, d·J)`. The two
+sizes can be set separately (`embedding_dim`, `context_embedding_dim`): there
+are about 2,100 perturbations but only 16 contexts, and sixteen points need at
+most 15 dimensions; 8 principal components already hold 96% of the variation
+between the contexts' control cells. Our current experiments use 64 and 8.
+
+The embeddings start at random by default, or from data:
+
+**Perturbation embeddings from how the target gene responds**
+(`pert_embedding_init="response"`). A perturbation's embedding starts from
+how its *target gene* behaves as a response gene when other genes are
+perturbed. Take the mean of each training pair's rows, keep the columns of the
+target genes, and transpose: one row per target gene, one column per training
+pair. The entries where the pair's own perturbation targets that gene are set
+to zero, since the knockdown itself would dominate. A truncated SVD of this
+matrix to the embedding size gives each target gene's starting embedding (64
+dimensions hold about 74% of its variance), rescaled to the size of a random
+start. Genes affected alike by many perturbations tend to sit in the same
+pathway, so their knockouts start close together. Only training pairs are
+used, so validation and test pairs never shape an embedding. Perturbations
+whose target is not among the response genes start at random; building the
+split with `--keep-perturbed-genes` keeps every measured target as a response
+gene (`extract.train.response_embeddings`).
+
+**Context embeddings from the control cells**
+(`--context-embedding-init control-means`). A context's embedding starts from
+the mean expression of its control (non-targeting) cells: the 100,000 control
+cells each context's logFC were computed against, averaged per gene over the
+response genes. PCA of the contexts × genes matrix (each gene centred across
+the 16 contexts, not relative to DMSO) gives each context's scores on the top
+components, rescaled to the size of a random start. The logFC are measured
+against each context's own controls, so the drug's direct effect on expression
+is removed from the data; what the control cells add is the cell state the
+drug creates, which shapes how perturbations act
+(`extract.train.control_mean_embeddings`, computed by
+`scripts/context_control_means.py`).
+
+Either way, the embeddings are trained further.
 
 The factorisation matters. A free embedding per observed pair would let the
 optimal discriminator become a lookup table ("answer real if and only if
@@ -411,7 +448,8 @@ transfer exactly, and only the structural argument above is claimed.
 | `(BBᵀ + εI)⁻¹` | [d, d] | loadings | one inverse per step |
 | `z` | [batch, d] | projection | derived, not fitted |
 | `q(z)` | [batch, d, J] | head | J = 4 |
-| `e_p`, `e_c` | [batch, 32] | label network | shared embeddings |
+| `e_p` | [batch, 32] | label network | shared perturbation embedding (`embedding_dim`) |
+| `e_c` | [batch, 32] | label network | shared context embedding (`context_embedding_dim`) |
 | `λ` | [batch, d, J] | label network | label-dependent coefficients |
 | `s` | [batch] | head | real/fake logit |
 
@@ -640,7 +678,9 @@ Defaults of `TrainConfig`:
 | `alpha` | 1.0 | reconstruction weight; `free` only |
 | `recon_fake_weight` | 0.0 | $\beta$ for synthetic rows; `free` only |
 | `basis` | lin, sq, abs, tanh | must keep a non-quadratic statistic |
-| `embedding_dim` / `label_hidden` | 32 / 128 | label network width |
+| `embedding_dim` / `context_embedding_dim` / `label_hidden` | 32 / = embedding_dim / 128 | perturbation embedding, context embedding, hidden layer |
+| `pert_embedding_init` | random | `response`: start from the target gene's responses across training pairs |
+| context embedding start | random | `fit(context_embedding_init=...)`; `--context-embedding-init control-means` in `sweep_grid.py` |
 | `ridge` | 1e-4 | Gram matrix conditioning |
 | `weight_scheme` | linear | $w \propto n$, capped at the 99th percentile |
 | `balance_negatives` | True | fakes equal positives |

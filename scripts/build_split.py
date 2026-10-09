@@ -48,6 +48,9 @@ def main() -> None:
                    help="context: shuffle all of a context's rows before the "
                         "split (test values can enter train/val synthetic "
                         "rows); partition: shuffle within partition x context")
+    p.add_argument("--keep-perturbed-genes", action="store_true",
+                   help="also keep every measured perturbation target as a response "
+                        "gene, whether or not it passes the filter")
     args = p.parse_args()
 
     manifest = build_split(
@@ -58,6 +61,7 @@ def main() -> None:
         min_affected=args.min_affected,
         threshold=args.threshold,
         shuffle_seeds=tuple(args.shuffle_seeds),
+        keep_perturbed_genes=args.keep_perturbed_genes,
         contexts=args.contexts,
         shuffle_within=args.shuffle_within,
     )

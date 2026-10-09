@@ -298,8 +298,14 @@ def build_split(
     shuffle_seeds: tuple[int, ...] = (0,),
     contexts: list[str] | None = None,
     shuffle_within: str = "context",
+    keep_perturbed_genes: bool = False,
+    control_label: str = "non-targeting",
 ) -> dict:
     """Draw the test pairs, then write both partitions. Returns the manifest.
+
+    ``keep_perturbed_genes`` also keeps every measured gene that is the target
+    of some perturbation, whether or not it passes the affected-count filter,
+    so that each targeted gene's own response is in the matrix.
 
     Two passes over the matrices: the first counts affected genes on train/val
     full-data rows, the second writes each context's rows, gene-filtered, into
@@ -358,9 +364,23 @@ def build_split(
     tv_main = meta_all[(meta_all.variant == "main") & ~_pair_key(meta_all).isin(held)]
     gl = gene_list_table(counts, tv_main, min_affected, threshold,
                          out_dir / "gene_list.tsv")
+    n_filter = int(gl.keep.sum())
+    if keep_perturbed_genes:
+        targets = set(meta_all.perturbation.astype(str)) - {control_label}
+        gl["perturbed"] = gl.gene.astype(str).isin(targets)
+        gl["keep"] = gl.keep | gl.perturbed
+        path = out_dir / "gene_list.tsv"
+        header = [ln for ln in path.read_text().splitlines(True) if ln.startswith("#")]
+        header.append(f"# plus perturbed genes: {int((gl.perturbed & (gl.n_affected < min_affected)).sum())} "
+                      f"targets kept below the filter\n")
+        with open(path, "w") as fh:
+            fh.writelines(header)
+            gl.to_csv(fh, sep="\t", index=False)
     genes = gl.loc[gl.keep, "gene"].tolist()
     print(f"[genes] {len(genes):,} of {len(genes_all):,} kept "
-          f"(|logFC| > {threshold:.5f} in >= {min_affected} train/val pairs)", flush=True)
+          f"(|logFC| > {threshold:.5f} in >= {min_affected} train/val pairs: {n_filter:,}"
+          + (f"; plus {len(genes) - n_filter:,} perturbed genes" if keep_perturbed_genes else "")
+          + ")", flush=True)
 
     # ---- 3. per context, per partition ------------------------------------
     per_context = []
@@ -412,7 +432,9 @@ def build_split(
         "rule": "every perturbation keeps >= 1 pair in trainval",
         "gene_filter": {"threshold": threshold, "min_affected": min_affected,
                         "computed_on": "trainval full-data rows",
-                        "n_genes": len(genes), "n_genes_before": len(genes_all)},
+                        "n_genes": len(genes), "n_genes_before": len(genes_all),
+                        "n_passing_filter": n_filter,
+                        "keep_perturbed_genes": keep_perturbed_genes},
         "shuffle_seeds": list(shuffle_seeds),
         "shuffled_within": ("context, before the split" if shuffle_within == "context"
                             else "partition x context"),

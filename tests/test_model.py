@@ -372,6 +372,52 @@ def _toy_dataset(n_pert=20, n_ctx=3, n_strata=4, n_genes=60, d_true=5, seed=0):
     )
 
 
+def test_label_net_takes_different_perturbation_and_context_sizes():
+    net = FactorizedLabelNet(30, 4, 6, 4, embedding_dim=64, context_embedding_dim=8)
+    assert net.perturbation_embedding.weight.shape == (30, 64)
+    assert net.context_embedding.weight.shape == (4, 8)
+    assert net(torch.tensor([0, 5]), torch.tensor([1, 3])).shape == (2, 6, 4)
+
+
+def test_response_embeddings_use_training_pairs_and_skip_own_knockdown():
+    from extract.train import response_embeddings
+    rng = np.random.default_rng(0)
+    n_pert, n_ctx, G = 12, 3, 20
+    p = np.repeat(np.arange(n_pert), n_ctx * 2); c = np.tile(np.repeat(np.arange(n_ctx), 2), n_pert)
+    X = rng.normal(size=(len(p), G)).astype(np.float32)
+    target = np.where(p < 10, p, NO_MASK)
+    X[np.arange(len(p))[p < 10], target[p < 10]] = 50.0
+    train = c < 2
+    E, has = response_embeddings(X, p, c, target, train, n_pert, dim=4)
+    assert has.tolist() == [True] * 10 + [False] * 2
+    assert np.allclose(E[~has], 0) and np.isclose(E[has].std(), 0.02, rtol=1e-3)
+    X2 = X.copy(); X2[np.arange(len(p))[p < 10], target[p < 10]] = -50.0
+    assert np.allclose(np.abs(E), np.abs(response_embeddings(X2, p, c, target, train, n_pert, dim=4)[0]), atol=1e-5)
+    X3 = X.copy(); X3[~train] = rng.normal(size=((~train).sum(), G))
+    assert np.allclose(np.abs(E), np.abs(response_embeddings(X3, p, c, target, train, n_pert, dim=4)[0]), atol=1e-5)
+
+
+def test_control_mean_embeddings_follow_the_context_order_and_scale():
+    from extract.train import control_mean_embeddings
+    rng = np.random.default_rng(0)
+    means = pd.DataFrame(rng.normal(size=(5, 40)) + 3.0, index=list("abcde"))
+    E = control_mean_embeddings(means, ["c", "a", "e", "b", "d"], dim=3)
+    assert E.shape == (5, 3) and np.isclose(E.std(), 0.02, rtol=1e-3)
+    E2 = control_mean_embeddings(means, list("abcde"), dim=3)
+    assert np.allclose(np.abs(E[0]), np.abs(E2[2]))
+    with pytest.raises(ValueError):
+        control_mean_embeddings(means, ["a", "z"], dim=3)
+
+
+def test_fit_starts_contexts_at_a_given_embedding():
+    X, p, c, s, n = _toy_dataset()
+    init = np.random.default_rng(1).normal(size=(3, 8)).astype(np.float32) * 0.02
+    cfg = TrainConfig(subspace="free", n_factors=5, epochs=0, batch_size=64, log_every=0,
+                      context_embedding_dim=8)
+    model, _ = fit(X, p, c, s, n, config=cfg, context_embedding_init=init)
+    assert np.allclose(model.label_net.context_embedding.weight.detach().numpy(), init)
+
+
 def test_fit_runs_and_reduces_both_terms():
     X, p, c, s, n = _toy_dataset()
     cfg = TrainConfig(subspace="free", n_factors=5, epochs=12, batch_size=64, log_every=0, seed=0)

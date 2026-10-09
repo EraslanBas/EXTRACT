@@ -49,6 +49,14 @@ class TrainConfig:
     #: rotation invariant and identifies nothing.
     basis: tuple[str, ...] = DEFAULT_BASIS
     embedding_dim: int = 32
+    #: Context embedding size; ``None`` = ``embedding_dim``.
+    context_embedding_dim: int | None = None
+
+    #: Starting perturbation embeddings. ``"random"``. ``"response"``: from how
+    #: each perturbation's target gene responds, as a response gene, across the
+    #: training pairs -- see :func:`response_embeddings`. Perturbations whose
+    #: target is not a response gene keep a random start. Trained further.
+    pert_embedding_init: str = "random"
     label_hidden: int = 128
     ridge: float = 1e-4
 
@@ -204,6 +212,7 @@ class Extract(nn.Module):
             n_factors=config.n_factors,
             n_basis=len(config.basis),
             embedding_dim=config.embedding_dim,
+            context_embedding_dim=config.context_embedding_dim,
             hidden=config.label_hidden,
         )
 
@@ -250,6 +259,73 @@ class Extract(nn.Module):
         return self.loadings.B.detach().cpu().numpy()
 
 
+def _pair_means(X, pair, rows, is_real=None):
+    """``(keys, means, counts)`` of the measured rows among ``rows``, per pair."""
+    rows = np.nonzero(rows)[0] if np.asarray(rows).dtype == bool else np.asarray(rows)
+    if is_real is not None:
+        rows = rows[np.asarray(is_real, dtype=bool)[rows]]
+    keys, inv, counts = np.unique(np.asarray(pair)[rows], return_inverse=True, return_counts=True)
+    sums = np.zeros((len(keys), X.shape[1]))
+    np.add.at(sums, inv, np.asarray(X[rows], dtype=np.float64))
+    return keys, sums / counts[:, None], counts
+
+
+def response_embeddings(
+    X: np.ndarray, perturbation_idx: np.ndarray, context_idx: np.ndarray,
+    target_col: np.ndarray, rows: np.ndarray, n_perturbations: int, dim: int,
+    is_real: np.ndarray | None = None, seed: int = 0, scale: float = 0.02,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Perturbation embeddings from how each target gene responds.
+
+    Transpose the training data: one row per target gene, one column per
+    training pair, holding that gene's response (the pair's mean over its
+    measured rows) in that pair. Entries where the pair's own perturbation
+    targets the gene are left out (set to 0) -- the knockdown would dominate.
+    A truncated SVD of these rows gives ``dim`` numbers per target gene,
+    rescaled so the entries have standard deviation ``scale`` (the size of the
+    random start). Uses training pairs only, so validation and test pairs never
+    shape an embedding. Returns ``(embeddings [n_perturbations, dim], has [n])``;
+    ``has`` is False for perturbations whose target is not a response gene.
+    """
+    from sklearn.utils.extmath import randomized_svd
+    n_ctx = int(context_idx.max()) + 1
+    pair = perturbation_idx * n_ctx + context_idx
+    keys, means, _ = _pair_means(X, pair, rows, is_real)
+    pair_pert = keys // n_ctx
+    col_of = np.full(n_perturbations, NO_MASK, dtype=np.int64)
+    ok = target_col != NO_MASK
+    col_of[perturbation_idx[ok]] = target_col[ok]
+    has = col_of != NO_MASK
+    T = means[:, col_of[has]].T.copy()                           # [targets, training pairs]
+    T[pair_pert[None, :] == np.nonzero(has)[0][:, None]] = 0.0   # own knockdown entries
+    U, S, _ = randomized_svd(T.astype(np.float32), min(dim, *T.shape), n_iter=7, random_state=seed)
+    E = np.zeros((n_perturbations, dim), dtype=np.float32)
+    Z = U * S
+    E[has, :Z.shape[1]] = (Z / Z.std() * scale).astype(np.float32)
+    return E, has
+
+
+def control_mean_embeddings(means, context_levels, dim: int, scale: float = 0.02) -> np.ndarray:
+    """Context embeddings [len(context_levels), dim] from the mean expression of
+    each context's control cells: PCA of the contexts x genes matrix (centred
+    across contexts, i.e. each gene minus its average over the contexts -- not
+    relative to DMSO), scores on the top ``dim`` components, rescaled so the
+    entries have standard deviation ``scale`` (the size of the random start).
+    ``means`` is a DataFrame indexed by context name."""
+    import pandas as pd
+    M = pd.DataFrame(means).reindex([str(c) for c in context_levels])
+    if M.isna().any().any():
+        missing = [c for c in context_levels if c not in means.index]
+        raise ValueError(f"no control means for contexts {missing}")
+    Z = M.to_numpy(dtype=np.float64)
+    Z = Z - Z.mean(0)
+    U, S, _ = np.linalg.svd(Z, full_matrices=False)
+    k = min(dim, len(S))
+    E = np.zeros((len(Z), dim))
+    E[:, :k] = U[:, :k] * S[:k]
+    return (E / E[:, :k].std() * scale).astype(np.float32)
+
+
 def fit(
     X: np.ndarray,
     perturbation_idx: np.ndarray,
@@ -265,6 +341,7 @@ def fit(
     synth_level: np.ndarray | None = None,
     subspace_basis: np.ndarray | None = None,
     noise_model=None,
+    context_embedding_init: np.ndarray | None = None,
 ) -> tuple[Extract, list[dict]]:
     """Fit the model. Returns ``(model, history)``.
 
@@ -399,6 +476,28 @@ def fit(
         subspace_basis=subspace_basis,
         noise_model=noise_model,
     ).to(device)
+    if config.pert_embedding_init == "response":
+        if target_col is None:
+            raise ValueError("pert_embedding_init='response' needs target_col (the target gene's column)")
+        emb, has = response_embeddings(
+            X, perturbation_idx, context_idx, np.asarray(target_col), train_idx,
+            n_perturbations, config.embedding_dim, is_real=is_real, seed=config.seed)
+        with torch.no_grad():
+            w = model.label_net.perturbation_embedding.weight
+            w[torch.from_numpy(has)] = torch.from_numpy(emb[has]).to(w)
+        if config.log_every:
+            print(f"perturbation embeddings: {int(has.sum())} of {n_perturbations} from "
+                  f"target-gene responses", flush=True)
+    elif config.pert_embedding_init != "random":
+        raise ValueError(f"pert_embedding_init must be 'random' or 'response', "
+                         f"got {config.pert_embedding_init!r}")
+    if context_embedding_init is not None:
+        w = model.label_net.context_embedding.weight
+        if tuple(np.shape(context_embedding_init)) != tuple(w.shape):
+            raise ValueError(f"context_embedding_init must be {tuple(w.shape)}, "
+                             f"got {np.shape(context_embedding_init)}")
+        with torch.no_grad():
+            w.copy_(torch.as_tensor(np.asarray(context_embedding_init), dtype=torch.float32))
     model.subspace_basis_ = subspace_basis
     model.noise_model_ = noise_model
 
