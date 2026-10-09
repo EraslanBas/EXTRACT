@@ -196,6 +196,11 @@ def main() -> int:
                     help="label -> lambda map: unconstrained MLP, the structured "
                          "product f(p) * g(c), or ammi a(p) + b(c) + f(p) * g(c); "
                          "non-mlp adds _<label-model> to the tag")
+    ap.add_argument("--subspace-method", choices=["rca", "snr"], default="rca",
+                    help="how V is computed: reliable components analysis (default) or "
+                         "signal over the within-pair noise model; snr adds _snr to the tag")
+    ap.add_argument("--rca-rank", type=int, default=100,
+                    help="RCA: R_W truncated to its top RANK eigen-directions")
     ap.add_argument("--noise-rank", type=int, default=50,
                     help="rank of the correlated-noise part of the noise model")
     ap.add_argument("--noise-max-rows", type=int, default=150_000,
@@ -262,22 +267,30 @@ def main() -> int:
     noise_model, bases = None, {}
     if set(args.subspace) - {"free"}:
         from extract.data.noise import (label_subspace, noise_covariance, pair_means,
-                                        within_pair_residuals)
+                                        rca_subspace, within_pair_residuals)
         t1 = time.time()
         train_real = real & ~val_all
         pair = (mtv.perturbation.astype(str) + "|" + mtv.context.astype(str)).to_numpy()
-        R = within_pair_residuals(Xtv, pair, train_real, max_rows=args.noise_max_rows,
-                                  seed=args.draw_seed)
-        noise_model = noise_covariance(R, rank=args.noise_rank, seed=args.draw_seed)
-        del R
-        _, means, counts = pair_means(Xtv, pair, train_real)
+        if args.subspace_method == "snr" or "anchored" in args.subspace:
+            R = within_pair_residuals(Xtv, pair, train_real, max_rows=args.noise_max_rows,
+                                      seed=args.draw_seed)
+            noise_model = noise_covariance(R, rank=args.noise_rank, seed=args.draw_seed)
+            del R
+            np.savez(args.out_dir / "noise_model.npz", diag=noise_model.diag,
+                     U=noise_model.U, s=noise_model.s)
+        if args.subspace_method == "snr":
+            _, means, counts = pair_means(Xtv, pair, train_real)
         for d_ in sorted(set(args.d)):
-            bases[d_], ev = label_subspace(means, counts, noise_model, d_)
-            np.save(args.out_dir / f"subspace_V_d{d_}.npy", bases[d_])
-        np.savez(args.out_dir / "noise_model.npz", diag=noise_model.diag,
-                 U=noise_model.U, s=noise_model.s)
-        print(f"noise model rank {args.noise_rank} from within-pair spread of train pairs; "
-              f"label subspaces for d={sorted(bases)}  ({time.time()-t1:.0f}s)", flush=True)
+            if args.subspace_method == "rca":
+                bases[d_], ev = rca_subspace(Xtv, pair, train_real, d_, rank=args.rca_rank,
+                                             seed=args.draw_seed)
+                np.save(args.out_dir / f"subspace_V_rca{args.rca_rank}_d{d_}.npy", bases[d_])
+                np.save(args.out_dir / f"rca_reliability_rca{args.rca_rank}_d{d_}.npy", ev)
+            else:
+                bases[d_], ev = label_subspace(means, counts, noise_model, d_)
+                np.save(args.out_dir / f"subspace_V_snr_d{d_}.npy", bases[d_])
+        print(f"label subspaces ({args.subspace_method}) for d={sorted(bases)} from the "
+              f"train pairs  ({time.time()-t1:.0f}s)", flush=True)
 
     # NAME=PATH loads external axes; a bare "V" means the label-driven subspace
     ext_bases = {}
@@ -305,6 +318,7 @@ def main() -> int:
                + ("" if head == ("linear", "square", "abs", "tanh") else f"_head-{'-'.join(head)}")
                + ("_Arandom" if args.axes_init == "random" and sub == "fixed" else "")
                + ("" if args.label_model == "mlp" else f"_{args.label_model}")
+               + ("" if sub == "free" else ("_snr" if args.subspace_method == "snr" else f"_rca{args.rca_rank}"))
                + ("_dist" if args.head == "distance" else "")
                + (f"_lwd{args.label_weight_decay:g}" if args.label_weight_decay else "")
                + (f"_ldo{args.label_dropout:g}" if args.label_dropout else "")
@@ -335,6 +349,7 @@ def main() -> int:
                           select_on=args.select_on, subspace=sub, basis=head,
                           axes_init=args.axes_init, label_model=args.label_model, head=args.head,
                           sparsity=args.sparsity,
+                          subspace_method=args.subspace_method, rca_rank=args.rca_rank,
                           label_weight_decay=args.label_weight_decay,
                           label_dropout=args.label_dropout)
         snaps: dict[int, np.ndarray] = {}
@@ -372,6 +387,7 @@ def main() -> int:
         row = {"tag": tag, "d": d, "alpha": a, "beta": b, "K": K, "seed": seed,
                "subspace": sub, "head_basis": ",".join(head), "basis": (bname if named else ("V" if sub != "free" else "")),
                "label_model": args.label_model, "head": args.head, "sparsity": args.sparsity,
+               "subspace_method": args.subspace_method, "rca_rank": args.rca_rank,
                "label_weight_decay": args.label_weight_decay, "label_dropout": args.label_dropout,
                "epochs_run": len(hist), "seconds": round(time.time()-t, 1)}
         for name, rows_ in (("train", np.nonzero(~val)[0]), ("val", np.nonzero(val)[0])):

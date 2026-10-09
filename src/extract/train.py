@@ -105,8 +105,17 @@ class TrainConfig:
     #: exactly, a probe of a given set of axes).
     subspace: str = "fixed"
 
-    #: Rank of the correlated part of the noise model behind ``V``, and the
-    #: number of subsample residuals used to fit it.
+    #: How V is computed (fixed mode). ``"rca"``: reliable components analysis
+    #: -- the directions whose values agree most between different rows of the
+    #: same pair, relative to their total variance (Dmochowski et al.); R_W
+    #: truncated to its top ``rca_rank`` eigen-directions. ``"snr"``: between-
+    #: pair signal over the within-pair noise model (the previous method; also
+    #: what ``"anchored"`` uses). See extract.data.noise.
+    subspace_method: str = "rca"
+    rca_rank: int = 100
+
+    #: Rank of the correlated part of the noise model (``"snr"`` and
+    #: ``"anchored"``), and the number of within-pair residuals used to fit it.
     noise_rank: int = 50
     noise_max_rows: int = 150_000
 
@@ -415,15 +424,24 @@ def fit(
                 raise ValueError(f"is_real has {len(np.asarray(is_real))} entries, X has {n_rows} rows")
             if not np.asarray(is_real, dtype=bool).any():
                 raise ValueError("no real rows: L_recon would have nothing to fit")
-        from .data.noise import label_subspace_from_rows
-        subspace_basis, nm = label_subspace_from_rows(
-            X, perturbation_idx, context_idx, train_idx,
-            d=config.n_factors, rank=config.noise_rank,
-            max_rows=config.noise_max_rows, seed=config.seed, is_real=is_real)
-        noise_model = noise_model if noise_model is not None else nm
+        from .data.noise import label_subspace_from_rows, rca_subspace_from_rows
+        if config.subspace_method not in ("rca", "snr"):
+            raise ValueError(f"subspace_method must be 'rca' or 'snr', got {config.subspace_method!r}")
+        if config.subspace_method == "rca" and config.subspace == "fixed":
+            subspace_basis = rca_subspace_from_rows(
+                X, perturbation_idx, context_idx, train_idx, d=config.n_factors,
+                rank=config.rca_rank, seed=config.seed, is_real=is_real)
+            what = f"RCA, R_W rank {config.rca_rank}"
+        else:
+            subspace_basis, nm = label_subspace_from_rows(
+                X, perturbation_idx, context_idx, train_idx,
+                d=config.n_factors, rank=config.noise_rank,
+                max_rows=config.noise_max_rows, seed=config.seed, is_real=is_real)
+            noise_model = noise_model if noise_model is not None else nm
+            what = f"signal/noise, noise rank {len(nm.s)}"
         if config.log_every:
-            print(f"label-driven subspace: d={config.n_factors}, noise rank "
-                  f"{len(nm.s)}, from the training rows", flush=True)
+            print(f"label-driven subspace: d={config.n_factors} ({what}), from the "
+                  f"training rows", flush=True)
 
     model = Extract(
         n_genes=n_genes,

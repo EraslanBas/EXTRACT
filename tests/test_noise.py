@@ -6,7 +6,7 @@ import pytest
 import torch
 
 from extract.data.noise import (NoiseModel, label_subspace, noise_covariance, pair_means,
-                                within_pair_residuals)
+                                rca_subspace, within_pair_residuals)
 from extract.models import FixedBasisLoadings, GlobalLoadings
 
 
@@ -160,3 +160,22 @@ def test_random_axes_init_differs_by_seed_and_keeps_the_span():
     Qb, _ = np.linalg.qr(a.B.detach().numpy().T); Qv, _ = np.linalg.qr(V.T)
     assert np.linalg.svd(Qb.T @ Qv, compute_uv=False).min() > 0.999
     assert torch.allclose(FixedBasisLoadings(V).A, torch.eye(4))  # default unchanged
+
+
+def test_rca_matches_brute_force_and_finds_the_signal_span():
+    X, meta, A, *_ = _planted(n_pairs=200, G=30, n_rep=4)
+    pair = _pair(meta)
+    G = X.shape[1]; Rb = np.zeros((G, G)); Rw = np.zeros((G, G))
+    for key in np.unique(pair):
+        Xi = X[pair == key].astype(float); k = len(Xi)
+        Rw += (k - 1) * Xi.T @ Xi
+        tot = Xi.sum(0)
+        Rb += np.outer(tot, tot) - Xi.T @ Xi
+    from scipy.linalg import eigh
+    rho, W = eigh(Rb, Rw)
+    V, r = rca_subspace(X, pair, np.ones(len(meta), bool), d=3, rank=G)
+    assert np.allclose(r, rho[::-1][:3], atol=1e-4)
+    Vb = (Rw @ W[:, ::-1][:, :3]).T
+    ov = lambda a, b: np.linalg.svd(np.linalg.qr(a.T)[0].T @ np.linalg.qr(b.T)[0], compute_uv=False).min()
+    assert ov(V, Vb) > 0.999 and ov(V, A) > 0.99
+    assert np.allclose(np.linalg.norm(V, axis=1), 1)

@@ -69,6 +69,11 @@ def build_argparser() -> argparse.ArgumentParser:
                    help="fixed (default): B = A V, V the label-driven subspace computed "
                         "from the training rows, only A learned; free: B learned "
                         "directly (the earlier model)")
+    g.add_argument("--subspace-method", choices=["rca", "snr"], default="rca",
+                   help="how V is computed in the fixed mode: reliable components analysis "
+                        "(default) or signal over the within-pair noise model")
+    g.add_argument("--rca-rank", type=int, default=100,
+                   help="RCA: R_W truncated to its top RANK eigen-directions")
     g.add_argument("--noise-rank", type=int, default=50,
                    help="rank of the correlated noise behind V")
     g = p.add_argument_group("tuned hyperparameters")
@@ -178,6 +183,7 @@ def main() -> None:
         eval_every=args.eval_every, patience=args.patience,
         select_on=args.select_on, log_every=max(1, args.epochs // 25),
         subspace=args.subspace, noise_rank=args.noise_rank,
+        subspace_method=args.subspace_method, rca_rank=args.rca_rank,
         label_model=args.label_model, head=args.head, sparsity=args.sparsity,
     )
     t0 = time.time()

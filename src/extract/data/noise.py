@@ -180,3 +180,65 @@ def label_subspace_from_rows(
     _, means, counts = pair_means(X, pair, rows, is_real)
     V, _ = label_subspace(means, counts, noise, d)
     return V, noise
+
+
+def rca_subspace(
+    X: np.ndarray, pair: np.ndarray, rows: np.ndarray, d: int, rank: int = 100,
+    seed: int = 0, is_real: np.ndarray | None = None,
+) -> tuple[np.ndarray, np.ndarray]:
+    """``(V [d, G], reliabilities [d])`` by reliable components analysis.
+
+    Dmochowski et al. (2012, 2015), with a (perturbation, context) pair as the
+    stimulus and its rows as the repeats. Over the measured rows among
+    ``rows``:
+
+        R_B = sum_pairs sum_{r != s} x_r^T x_s      (across repeats: shared part)
+        R_W = sum_pairs (k - 1) sum_r x_r^T x_r      (within repeats: signal + noise)
+
+    The ``(k - 1)`` weight is the number of row pairs each row belongs to, so
+    both sums run over the same pairs of rows; pairs with a single row form no
+    pair and drop out. The components maximise the reliability
+    ``rho = w R_B w^T / w R_W w^T`` (in [-1, 1]), i.e. solve
+    ``R_B w = rho R_W w``. As in RCA, ``R_W`` is regularised by truncation to its
+    top ``rank`` eigen-directions: the problem is solved in that subspace. The
+    rows of ``V`` are the forward-model patterns ``w R_W``, each of unit norm.
+    No centring (zero is "no response" for logFC) and no cell counts.
+    """
+    rows = _rows_index(rows, is_real, len(X))
+    keys, inv, counts = np.unique(np.asarray(pair)[rows], return_inverse=True, return_counts=True)
+    keep = counts[inv] >= 2
+    rows, inv = rows[keep], inv[keep]
+    if not len(rows):
+        raise ValueError("no pair has two or more rows; RCA needs repeats")
+    k = counts[inv].astype(np.float64)
+    Xr = np.asarray(X[rows], dtype=np.float64)
+    # top `rank` eigen-directions of R_W = Xw^T Xw, Xw rows scaled by sqrt(k - 1)
+    from sklearn.utils.extmath import randomized_svd
+    Xw = Xr * np.sqrt(k - 1)[:, None]
+    _, sw, Ut = randomized_svd(Xw.astype(np.float32), min(rank, *Xw.shape) , n_iter=6, random_state=seed)
+    U = Ut.T.astype(np.float64)                          # [G, K]
+    Rw = np.diag(sw.astype(np.float64) ** 2)             # R_W in that basis
+    # R_B = sum_pairs (k^2 xbar^T xbar - sum_r x_r^T x_r), in the same basis
+    Y = Xr @ U                                           # rows in the K-dim basis
+    sums = np.zeros((len(keys), U.shape[1])); np.add.at(sums, inv, Y)
+    Rb = sums.T @ sums - Y.T @ Y
+    Rb = 0.5 * (Rb + Rb.T)
+    # R_B w = rho R_W w with R_W diagonal: whiten, then a symmetric eigenproblem
+    iw = 1.0 / np.sqrt(np.diag(Rw))
+    rho, E = np.linalg.eigh(Rb * iw[:, None] * iw[None, :])
+    order = np.argsort(rho)[::-1][:d]
+    Wk = E[:, order] * iw[:, None]                       # filters in the K basis
+    V = (U @ (Rw @ Wk)).T                                # patterns w R_W, back in genes
+    V /= np.linalg.norm(V, axis=1, keepdims=True)
+    return V.astype(np.float32), rho[order]
+
+
+def rca_subspace_from_rows(
+    X: np.ndarray, perturbation_idx: np.ndarray, context_idx: np.ndarray,
+    rows: np.ndarray, d: int, rank: int = 100, seed: int = 0,
+    is_real: np.ndarray | None = None,
+) -> np.ndarray:
+    """:func:`rca_subspace` with the pair key built from the label indices."""
+    pair = np.asarray(perturbation_idx, dtype=np.int64) * (int(np.max(context_idx)) + 1) \
+        + np.asarray(context_idx, dtype=np.int64)
+    return rca_subspace(X, pair, rows, d, rank=rank, seed=seed, is_real=is_real)[0]
