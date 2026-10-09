@@ -227,6 +227,28 @@ def test_label_net_takes_different_perturbation_and_context_sizes():
     assert net(torch.tensor([0, 5]), torch.tensor([1, 3])).shape == (2, 6, 1)
 
 
+def test_control_mean_embeddings_follow_the_context_order_and_scale():
+    import pandas as pd
+    from extract.train import control_mean_embeddings
+    rng = np.random.default_rng(0)
+    means = pd.DataFrame(rng.normal(size=(5, 40)) + 3.0, index=list("abcde"))
+    E = control_mean_embeddings(means, ["c", "a", "e", "b", "d"], dim=3)
+    assert E.shape == (5, 3) and np.isclose(E.std(), 0.02, rtol=1e-3)
+    E2 = control_mean_embeddings(means, list("abcde"), dim=3)
+    assert np.allclose(np.abs(E[0]), np.abs(E2[2]))           # row of context "c"
+    with pytest.raises(ValueError):
+        control_mean_embeddings(means, ["a", "z"], dim=3)
+
+
+def test_fit_starts_contexts_at_a_given_embedding():
+    X, p, c, s, n = _toy_dataset()
+    init = np.random.default_rng(1).normal(size=(3, 8)).astype(np.float32) * 0.02
+    cfg = TrainConfig(n_factors=5, epochs=0, batch_size=64, log_every=0, head="distance",
+                      noise_rank=3, context_embedding_dim=8)
+    model, _ = fit(X, p, c, config=cfg, context_embedding_init=init)
+    assert np.allclose(model.label_net.context_embedding.weight.detach().numpy(), init)
+
+
 def test_response_embeddings_use_training_pairs_and_skip_own_knockdown():
     from extract.train import response_embeddings
     rng = np.random.default_rng(0)

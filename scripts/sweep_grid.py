@@ -188,7 +188,13 @@ def main() -> int:
     ap.add_argument("--label-dropout", type=float, default=0.0,
                     help="dropout in the MLP label network; adds _ldo<x>")
     ap.add_argument("--embedding-dim", type=int, default=64, help="perturbation embedding size")
-    ap.add_argument("--context-embedding-dim", type=int, default=16, help="context embedding size")
+    ap.add_argument("--context-embedding-dim", type=int, default=8, help="context embedding size")
+    ap.add_argument("--context-embedding-init", choices=["random", "control-means"], default="random",
+                    help="start context embeddings at random or at the PCA of each context's "
+                         "control-cell mean expression (--context-means); adds _ctxctrl")
+    ap.add_argument("--context-means", type=Path, default=None,
+                    help="contexts x genes control means (default $EXTRACT_ROOT/context_control_means.parquet, "
+                         "from scripts/context_control_means.py)")
     ap.add_argument("--pert-embedding-init", choices=["random", "response"], default="random",
                     help="start perturbation embeddings at random or from how each target "
                          "gene responds across the training pairs; response adds _embresp")
@@ -337,6 +343,9 @@ def main() -> int:
                + (f"_lwd{args.label_weight_decay:g}" if args.label_weight_decay else "")
                + (f"_ldo{args.label_dropout:g}" if args.label_dropout else "")
                + ("_embresp" if args.pert_embedding_init == "response" else "")
+               + ("_ctxctrl" if args.context_embedding_init == "control-means" else "")
+               + (f"_emb{args.embedding_dim}x{args.context_embedding_dim}"
+                  if (args.embedding_dim, args.context_embedding_dim) != (32, 32) else "")
                + (f"_sparse{args.sparsity:g}" if args.sparsity else ""))
         # re-read each time: cheap, and means a cell finished by any earlier
         # or concurrent process is never repeated
@@ -356,6 +365,11 @@ def main() -> int:
         synth_level = meta.shuffle_frac.to_numpy(dtype=float)
         fa = prepare(X, meta, genes)
         plev, clev = fa.pop("perturbation_levels"), fa.pop("context_levels")
+        ctx_init = None
+        if args.context_embedding_init == "control-means":
+            from extract.train import control_mean_embeddings
+            cm = pd.read_parquet(args.context_means or paths.root() / "context_control_means.parquet")
+            ctx_init = control_mean_embeddings(cm, clev, args.context_embedding_dim)
         cfg = TrainConfig(n_factors=d, alpha=a, recon_fake_weight=b, seed=seed,
                           epochs=args.epochs, batch_size=args.batch_size,
                           device=args.device, log_every=0,
@@ -374,7 +388,7 @@ def main() -> int:
         model, hist = fit(config=cfg, train_rows=~val, val_rows=val,
                           is_real=is_real, synth_level=synth_level,
                           subspace_basis=(ext_bases[bname] if use_ext else bases.get(d)),
-                          noise_model=noise_model,
+                          noise_model=noise_model, context_embedding_init=ctx_init,
                           on_eval=lambda ep, m: snaps.__setitem__(ep, m.loading_matrix().copy()),
                           **fa)
         pd.DataFrame(hist).to_csv(args.out_dir/f"history_{tag}.csv", index=False)
@@ -408,6 +422,7 @@ def main() -> int:
                "subspace_method": args.subspace_method, "rca_rank": args.rca_rank,
                "free_init": args.free_init, "pert_embedding_init": args.pert_embedding_init,
                "embedding_dim": args.embedding_dim, "context_embedding_dim": args.context_embedding_dim,
+               "context_embedding_init": args.context_embedding_init,
                "label_weight_decay": args.label_weight_decay, "label_dropout": args.label_dropout,
                "epochs_run": len(hist), "seconds": round(time.time()-t, 1)}
         for name, rows_ in (("train", np.nonzero(~val)[0]), ("val", np.nonzero(val)[0])):
