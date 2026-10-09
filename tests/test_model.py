@@ -220,6 +220,26 @@ def test_fit_runs_with_the_distance_head(label_model):
     assert history[-1]["disc"] < history[0]["disc"]
 
 
+def test_response_embeddings_use_training_pairs_and_skip_own_knockdown():
+    from extract.train import response_embeddings
+    rng = np.random.default_rng(0)
+    n_pert, n_ctx, G = 12, 3, 20
+    p = np.repeat(np.arange(n_pert), n_ctx * 2); c = np.tile(np.repeat(np.arange(n_ctx), 2), n_pert)
+    X = rng.normal(size=(len(p), G)).astype(np.float32)
+    target = np.where(p < 10, p, NO_MASK)                      # perts 10, 11: target not a response gene
+    X[np.arange(len(p))[p < 10], target[p < 10]] = 50.0        # huge on-target knockdown
+    train = c < 2
+    E, has = response_embeddings(X, p, c, target, train, n_pert, dim=4)
+    assert has.tolist() == [True] * 10 + [False] * 2
+    assert np.allclose(E[~has], 0) and np.isclose(E[has].std(), 0.02, rtol=1e-3)
+    # the knockdown entries are left out: changing them does not change the embeddings
+    X2 = X.copy(); X2[np.arange(len(p))[p < 10], target[p < 10]] = -50.0
+    assert np.allclose(np.abs(E), np.abs(response_embeddings(X2, p, c, target, train, n_pert, dim=4)[0]), atol=1e-5)
+    # held-out pairs do not enter
+    X3 = X.copy(); X3[~train] = rng.normal(size=((~train).sum(), G))
+    assert np.allclose(np.abs(E), np.abs(response_embeddings(X3, p, c, target, train, n_pert, dim=4)[0]), atol=1e-5)
+
+
 def test_fit_runs_with_label_regularisation():
     X, p, c, s, n = _toy_dataset()
     cfg = TrainConfig(n_factors=5, epochs=4, batch_size=64, log_every=0, seed=0, head="distance",

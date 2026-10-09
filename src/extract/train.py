@@ -151,6 +151,13 @@ class TrainConfig:
     label_weight_decay: float = 0.0
     label_dropout: float = 0.0
 
+    #: Starting perturbation embeddings (MLP label model). ``"random"``.
+    #: ``"response"``: from how each perturbation's target gene responds, as a
+    #: response gene, across the training pairs -- see
+    #: :func:`response_embeddings`. Perturbations whose target is not a
+    #: response gene keep a random start. Trained further either way.
+    pert_embedding_init: str = "random"
+
     #: Weight rho of the activity-sparsity penalty,
     #: rho * sum_k mean_rows |z_k| / sd(z_k), over the batch's measured
     #: rows. Each perturbation should engage few programs; mixing the
@@ -319,6 +326,42 @@ class Extract(nn.Module):
         return self.loadings.B.detach().cpu().numpy()
 
 
+def response_embeddings(
+    X: np.ndarray, perturbation_idx: np.ndarray, context_idx: np.ndarray,
+    target_col: np.ndarray, rows: np.ndarray, n_perturbations: int, dim: int,
+    is_real: np.ndarray | None = None, seed: int = 0, scale: float = 0.02,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Perturbation embeddings from how each target gene responds.
+
+    Transpose the training data: one row per target gene, one column per
+    training pair, holding that gene's response (the pair's mean over its
+    measured rows) in that pair. Entries where the pair's own perturbation
+    targets the gene are left out (set to 0) -- the knockdown would dominate.
+    A truncated SVD of these rows gives ``dim`` numbers per target gene,
+    rescaled so the entries have standard deviation ``scale`` (the size of the
+    random start). Uses training pairs only, so validation and test pairs never
+    shape an embedding. Returns ``(embeddings [n_perturbations, dim], has [n])``;
+    ``has`` is False for perturbations whose target is not a response gene.
+    """
+    from sklearn.utils.extmath import randomized_svd
+    from .data.noise import pair_means
+    rows = np.nonzero(rows)[0] if np.asarray(rows).dtype == bool else np.asarray(rows)
+    pair = perturbation_idx * (int(context_idx.max()) + 1) + context_idx
+    keys, means, _ = pair_means(X, pair, rows, is_real)
+    pair_pert = keys // (int(context_idx.max()) + 1)
+    col_of = np.full(n_perturbations, NO_MASK, dtype=np.int64)
+    ok = target_col != NO_MASK
+    col_of[perturbation_idx[ok]] = target_col[ok]
+    has = col_of != NO_MASK
+    T = means[:, col_of[has]].T.copy()                       # [targets, training pairs]
+    T[pair_pert[None, :] == np.nonzero(has)[0][:, None]] = 0.0   # own knockdown entries
+    U, S, _ = randomized_svd(T.astype(np.float32), min(dim, *T.shape), n_iter=7, random_state=seed)
+    E = np.zeros((n_perturbations, dim), dtype=np.float32)
+    Z = U * S
+    E[has, :Z.shape[1]] = (Z / Z.std() * scale).astype(np.float32)
+    return E, has
+
+
 def fit(
     X: np.ndarray,
     perturbation_idx: np.ndarray,
@@ -477,6 +520,23 @@ def fit(
         subspace_basis=subspace_basis,
         noise_model=noise_model,
     ).to(device)
+    if config.pert_embedding_init == "response":
+        if not isinstance(model.label_net, FactorizedLabelNet):
+            raise ValueError("pert_embedding_init='response' needs the MLP label model")
+        if target_col is None:
+            raise ValueError("pert_embedding_init='response' needs target_col (the target gene's column)")
+        emb, has = response_embeddings(
+            X, perturbation_idx, context_idx, np.asarray(target_col), train_idx,
+            n_perturbations, config.embedding_dim, is_real=is_real, seed=config.seed)
+        with torch.no_grad():
+            w = model.label_net.perturbation_embedding.weight
+            w[torch.from_numpy(has)] = torch.from_numpy(emb[has]).to(w)
+        if config.log_every:
+            print(f"perturbation embeddings: {int(has.sum())} of {n_perturbations} from "
+                  f"target-gene responses", flush=True)
+    elif config.pert_embedding_init != "random":
+        raise ValueError(f"pert_embedding_init must be 'random' or 'response', "
+                         f"got {config.pert_embedding_init!r}")
     model.subspace_basis_ = subspace_basis
     model.noise_model_ = noise_model
 

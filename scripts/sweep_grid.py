@@ -187,6 +187,9 @@ def main() -> int:
                     help="AdamW weight decay on the label network only; adds _lwd<x>")
     ap.add_argument("--label-dropout", type=float, default=0.0,
                     help="dropout in the MLP label network; adds _ldo<x>")
+    ap.add_argument("--pert-embedding-init", choices=["random", "response"], default="random",
+                    help="start perturbation embeddings at random or from how each target "
+                         "gene responds across the training pairs; response adds _embresp")
     ap.add_argument("--sparsity", type=float, default=0.0,
                    help="weight of the activity-sparsity penalty (0 = off); adds _sparse<w> to the tag")
     ap.add_argument("--head", default="statistics", choices=["statistics", "distance"],
@@ -331,6 +334,7 @@ def main() -> int:
                + ("_dist" if args.head == "distance" else "")
                + (f"_lwd{args.label_weight_decay:g}" if args.label_weight_decay else "")
                + (f"_ldo{args.label_dropout:g}" if args.label_dropout else "")
+               + ("_embresp" if args.pert_embedding_init == "response" else "")
                + (f"_sparse{args.sparsity:g}" if args.sparsity else ""))
         # re-read each time: cheap, and means a cell finished by any earlier
         # or concurrent process is never repeated
@@ -359,7 +363,7 @@ def main() -> int:
                           axes_init=args.axes_init, label_model=args.label_model, head=args.head,
                           sparsity=args.sparsity,
                           subspace_method=args.subspace_method, rca_rank=args.rca_rank,
-                          free_init=args.free_init,
+                          free_init=args.free_init, pert_embedding_init=args.pert_embedding_init,
                           label_weight_decay=args.label_weight_decay,
                           label_dropout=args.label_dropout)
         snaps: dict[int, np.ndarray] = {}
@@ -398,7 +402,7 @@ def main() -> int:
                "subspace": sub, "head_basis": ",".join(head), "basis": (bname if named else ("V" if sub != "free" else "")),
                "label_model": args.label_model, "head": args.head, "sparsity": args.sparsity,
                "subspace_method": args.subspace_method, "rca_rank": args.rca_rank,
-               "free_init": args.free_init,
+               "free_init": args.free_init, "pert_embedding_init": args.pert_embedding_init,
                "label_weight_decay": args.label_weight_decay, "label_dropout": args.label_dropout,
                "epochs_run": len(hist), "seconds": round(time.time()-t, 1)}
         for name, rows_ in (("train", np.nonzero(~val)[0]), ("val", np.nonzero(val)[0])):
