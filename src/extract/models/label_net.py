@@ -26,7 +26,9 @@ class FactorizedLabelNet(nn.Module):
     Parameters
     ----------
     embedding_dim
-        Width of ``e_p`` and ``e_c``.
+        Width of ``e_p`` and ``e_c``, unless ``context_embedding_dim`` is given.
+    context_embedding_dim
+        Width of ``e_c`` when it differs from ``e_p``'s.
     hidden
         Width of the interaction MLP. Set ``hidden=0`` for a purely bilinear
         (additive-in-embeddings) map, which is the low-rank interaction model.
@@ -41,13 +43,15 @@ class FactorizedLabelNet(nn.Module):
         embedding_dim: int = 32,
         hidden: int = 128,
         dropout: float = 0.0,
+        context_embedding_dim: int | None = None,
     ):
         super().__init__()
+        ctx_dim = embedding_dim if context_embedding_dim is None else context_embedding_dim
         self.n_factors = n_factors
         self.n_basis = n_basis
 
         self.perturbation_embedding = nn.Embedding(n_perturbations, embedding_dim)
-        self.context_embedding = nn.Embedding(n_contexts, embedding_dim)
+        self.context_embedding = nn.Embedding(n_contexts, ctx_dim)
         nn.init.normal_(self.perturbation_embedding.weight, std=0.02)
         nn.init.normal_(self.context_embedding.weight, std=0.02)
 
@@ -57,13 +61,13 @@ class FactorizedLabelNet(nn.Module):
         if hidden:
             self.head = nn.Sequential(
                 nn.Dropout(dropout),
-                nn.Linear(2 * embedding_dim, hidden),
+                nn.Linear(embedding_dim + ctx_dim, hidden),
                 nn.ReLU(),
                 nn.Dropout(dropout),
                 nn.Linear(hidden, out_dim),
             )
         else:
-            self.head = nn.Sequential(nn.Dropout(dropout), nn.Linear(2 * embedding_dim, out_dim))
+            self.head = nn.Sequential(nn.Dropout(dropout), nn.Linear(embedding_dim + ctx_dim, out_dim))
 
     def forward(
         self, perturbation_idx: torch.Tensor, context_idx: torch.Tensor

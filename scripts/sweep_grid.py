@@ -187,6 +187,8 @@ def main() -> int:
                     help="AdamW weight decay on the label network only; adds _lwd<x>")
     ap.add_argument("--label-dropout", type=float, default=0.0,
                     help="dropout in the MLP label network; adds _ldo<x>")
+    ap.add_argument("--embedding-dim", type=int, default=64, help="perturbation embedding size")
+    ap.add_argument("--context-embedding-dim", type=int, default=16, help="context embedding size")
     ap.add_argument("--pert-embedding-init", choices=["random", "response"], default="random",
                     help="start perturbation embeddings at random or from how each target "
                          "gene responds across the training pairs; response adds _embresp")
@@ -364,6 +366,8 @@ def main() -> int:
                           sparsity=args.sparsity,
                           subspace_method=args.subspace_method, rca_rank=args.rca_rank,
                           free_init=args.free_init, pert_embedding_init=args.pert_embedding_init,
+                          embedding_dim=args.embedding_dim,
+                          context_embedding_dim=args.context_embedding_dim,
                           label_weight_decay=args.label_weight_decay,
                           label_dropout=args.label_dropout)
         snaps: dict[int, np.ndarray] = {}
@@ -403,6 +407,7 @@ def main() -> int:
                "label_model": args.label_model, "head": args.head, "sparsity": args.sparsity,
                "subspace_method": args.subspace_method, "rca_rank": args.rca_rank,
                "free_init": args.free_init, "pert_embedding_init": args.pert_embedding_init,
+               "embedding_dim": args.embedding_dim, "context_embedding_dim": args.context_embedding_dim,
                "label_weight_decay": args.label_weight_decay, "label_dropout": args.label_dropout,
                "epochs_run": len(hist), "seconds": round(time.time()-t, 1)}
         for name, rows_ in (("train", np.nonzero(~val)[0]), ("val", np.nonzero(val)[0])):

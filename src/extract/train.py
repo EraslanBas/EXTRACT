@@ -47,7 +47,10 @@ class TrainConfig:
     #: Must retain a non-quadratic statistic: a purely quadratic head is
     #: rotation invariant and identifies nothing.
     basis: tuple[str, ...] = DEFAULT_BASIS
-    embedding_dim: int = 32
+    #: Sizes of the perturbation and context embeddings (MLP label model).
+    #: 2,125 perturbations but only 16 contexts, hence the different sizes.
+    embedding_dim: int = 64
+    context_embedding_dim: int = 16
     label_hidden: int = 128
     ridge: float = 1e-4
 
@@ -275,6 +278,7 @@ class Extract(nn.Module):
                 n_factors=config.n_factors,
                 n_basis=n_basis,
                 embedding_dim=config.embedding_dim,
+                context_embedding_dim=config.context_embedding_dim,
                 hidden=config.label_hidden,
                 dropout=config.label_dropout,
             )

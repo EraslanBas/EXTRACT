@@ -220,6 +220,13 @@ def test_fit_runs_with_the_distance_head(label_model):
     assert history[-1]["disc"] < history[0]["disc"]
 
 
+def test_label_net_takes_different_perturbation_and_context_sizes():
+    net = FactorizedLabelNet(30, 4, 6, 1, embedding_dim=64, context_embedding_dim=16)
+    assert net.perturbation_embedding.weight.shape == (30, 64)
+    assert net.context_embedding.weight.shape == (4, 16)
+    assert net(torch.tensor([0, 5]), torch.tensor([1, 3])).shape == (2, 6, 1)
+
+
 def test_response_embeddings_use_training_pairs_and_skip_own_knockdown():
     from extract.train import response_embeddings
     rng = np.random.default_rng(0)
