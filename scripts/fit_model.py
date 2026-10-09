@@ -69,7 +69,7 @@ def build_argparser() -> argparse.ArgumentParser:
                    help="fixed (default): B = A V, V the label-driven subspace computed "
                         "from the training rows, only A learned; free: B learned "
                         "directly (the earlier model)")
-    g.add_argument("--subspace-method", choices=["rca", "snr"], default="rca",
+    g.add_argument("--subspace-method", choices=["rca", "snr", "pca"], default="rca",
                    help="how V is computed in the fixed mode: reliable components analysis "
                         "(default) or signal over the within-pair noise model")
     g.add_argument("--rca-rank", type=int, default=100,

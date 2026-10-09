@@ -19,7 +19,7 @@ import torch.nn.functional as F
 from torch import nn
 
 from .data.ontarget import on_target_index
-from .models import (AMMILabelNet, FactorizedLabelNet, ProductLabelNet, FixedBasisLoadings, GlobalLoadings,
+from .models import (initial_axes, AMMILabelNet, FactorizedLabelNet, ProductLabelNet, FixedBasisLoadings, GlobalLoadings,
                      PerComponentHead, UnconstrainedHead, DistanceHead)
 from .models.heads import DEFAULT_BASIS
 from .models.loadings import NO_MASK
@@ -105,7 +105,8 @@ class TrainConfig:
     #: exactly, a probe of a given set of axes).
     subspace: str = "fixed"
 
-    #: How V is computed (fixed mode). ``"rca"``: reliable components analysis
+    #: How V is computed (fixed mode). ``"pca"``: PCA of the pair means (every
+    #: row of a pair averaged; uncentred). ``"rca"``: reliable components analysis
     #: -- the directions whose values agree most between different rows of the
     #: same pair, relative to their total variance (Dmochowski et al.); R_W
     #: truncated to its top ``rca_rank`` eigen-directions. ``"snr"``: between-
@@ -113,6 +114,13 @@ class TrainConfig:
     #: what ``"anchored"`` uses). See extract.data.noise.
     subspace_method: str = "rca"
     rca_rank: int = 100
+
+    #: Free mode only. ``"random"``: B starts at random (the earlier free
+    #: model). ``"basis"``: B starts where the fixed model starts, ``A0 V``
+    #: (``A0`` from ``axes_init`` and the seed, V from ``subspace_method``), and
+    #: is then learned freely -- the same start as the fixed model, without the
+    #: constraint.
+    free_init: str = "random"
 
     #: Rank of the correlated part of the noise model (``"snr"`` and
     #: ``"anchored"``), and the number of within-pair residuals used to fit it.
@@ -212,6 +220,8 @@ class Extract(nn.Module):
             raise ValueError(f"unknown subspace mode {config.subspace!r}")
         if config.subspace != "free" and subspace_basis is None:
             raise ValueError(f"subspace={config.subspace!r} needs subspace_basis")
+        if config.subspace == "free" and config.free_init == "random":
+            subspace_basis = None
         if subspace_basis is not None and np.asarray(subspace_basis).shape != (config.n_factors, n_genes):
             raise ValueError(f"subspace_basis must be [{config.n_factors}, {n_genes}]")
         if config.subspace in ("fixed", "frozen"):
@@ -220,6 +230,14 @@ class Extract(nn.Module):
                                                axes_init=config.axes_init, seed=config.seed)
         else:
             self.loadings = GlobalLoadings(config.n_factors, n_genes, ridge=config.ridge)
+            if config.subspace == "free" and config.free_init == "basis":
+                if subspace_basis is None:
+                    raise ValueError("free_init='basis' needs subspace_basis")
+                A0 = initial_axes(config.n_factors, config.axes_init, config.seed)
+                with torch.no_grad():
+                    self.loadings.B.copy_(A0 @ torch.as_tensor(np.asarray(subspace_basis), dtype=torch.float32))
+            elif config.subspace == "free" and config.free_init != "random":
+                raise ValueError(f"free_init must be 'random' or 'basis', got {config.free_init!r}")
             if config.subspace == "anchored":
                 if noise_model is None:
                     raise ValueError("subspace='anchored' needs noise_model")
@@ -415,7 +433,9 @@ def fit(
             f"{config.batch_size}"
         )
 
-    if config.subspace in ("fixed", "anchored") and subspace_basis is None:
+    needs_basis = config.subspace in ("fixed", "anchored") or (
+        config.subspace == "free" and config.free_init == "basis")
+    if needs_basis and subspace_basis is None:
         # the label-driven subspace, from the measured TRAINING rows only.
         # is_real is validated here as well, since it is read before the
         # general check further down.
@@ -424,10 +444,16 @@ def fit(
                 raise ValueError(f"is_real has {len(np.asarray(is_real))} entries, X has {n_rows} rows")
             if not np.asarray(is_real, dtype=bool).any():
                 raise ValueError("no real rows: L_recon would have nothing to fit")
-        from .data.noise import label_subspace_from_rows, rca_subspace_from_rows
-        if config.subspace_method not in ("rca", "snr"):
-            raise ValueError(f"subspace_method must be 'rca' or 'snr', got {config.subspace_method!r}")
-        if config.subspace_method == "rca" and config.subspace == "fixed":
+        from .data.noise import (label_subspace_from_rows, pca_subspace_from_rows,
+                                 rca_subspace_from_rows)
+        if config.subspace_method not in ("rca", "snr", "pca"):
+            raise ValueError(f"subspace_method must be 'rca', 'snr' or 'pca', got {config.subspace_method!r}")
+        if config.subspace_method == "pca" and config.subspace != "anchored":
+            subspace_basis = pca_subspace_from_rows(
+                X, perturbation_idx, context_idx, train_idx, d=config.n_factors,
+                seed=config.seed, is_real=is_real)
+            what = "PCA of the pair means"
+        elif config.subspace_method == "rca" and config.subspace != "anchored":
             subspace_basis = rca_subspace_from_rows(
                 X, perturbation_idx, context_idx, train_idx, d=config.n_factors,
                 rank=config.rca_rank, seed=config.seed, is_real=is_real)

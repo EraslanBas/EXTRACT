@@ -233,6 +233,18 @@ class GlobalLoadings(nn.Module):
         return num / torch.linalg.norm(x, dim=1).clamp_min(1e-12)
 
 
+def initial_axes(d: int, axes_init: str = "identity", seed: int = 0) -> torch.Tensor:
+    """Starting ``A`` [d, d] for ``B = A V``: the identity, or a random rotation
+    drawn from ``seed`` (different for every seed, so that cross-seed agreement
+    cannot come from a shared starting point)."""
+    if axes_init == "identity":
+        return torch.eye(d)
+    if axes_init == "random":
+        Q, _ = np.linalg.qr(np.random.default_rng(seed).normal(size=(d, d)))
+        return torch.as_tensor(Q, dtype=torch.float32)
+    raise ValueError(f"axes_init must be 'identity' or 'random', got {axes_init!r}")
+
+
 class FixedBasisLoadings(GlobalLoadings):
     """``B = A V`` with ``V`` [d, G] fixed and only ``A`` [d, d] learned.
 
@@ -250,15 +262,7 @@ class FixedBasisLoadings(GlobalLoadings):
         self.n_factors, self.n_genes = V.shape
         self.ridge = ridge
         self.register_buffer("V", V)
-        if axes_init == "identity":
-            A0 = torch.eye(self.n_factors)
-        elif axes_init == "random":
-            # a random rotation of V's axes, different for every seed, so that
-            # cross-seed agreement cannot come from a shared starting point
-            Q, _ = np.linalg.qr(np.random.default_rng(seed).normal(size=(self.n_factors,) * 2))
-            A0 = torch.as_tensor(Q, dtype=torch.float32)
-        else:
-            raise ValueError(f"axes_init must be 'identity' or 'random', got {axes_init!r}")
+        A0 = initial_axes(self.n_factors, axes_init, seed)
         if learn_axes:
             self.A = nn.Parameter(A0)
         else:                     # "frozen": B = V exactly, a probe of V's axes

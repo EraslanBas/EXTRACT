@@ -6,7 +6,7 @@ import pytest
 import torch
 
 from extract.data.noise import (NoiseModel, label_subspace, noise_covariance, pair_means,
-                                rca_subspace, within_pair_residuals)
+                                pca_subspace, rca_subspace, within_pair_residuals)
 from extract.models import FixedBasisLoadings, GlobalLoadings
 
 
@@ -179,3 +179,24 @@ def test_rca_matches_brute_force_and_finds_the_signal_span():
     ov = lambda a, b: np.linalg.svd(np.linalg.qr(a.T)[0].T @ np.linalg.qr(b.T)[0], compute_uv=False).min()
     assert ov(V, Vb) > 0.999 and ov(V, A) > 0.99
     assert np.allclose(np.linalg.norm(V, axis=1), 1)
+
+
+def test_pca_subspace_is_the_top_svd_of_the_pair_means():
+    X, meta, A, *_ = _planted(n_pairs=200, G=30, n_rep=4)
+    allr = np.ones(len(meta), bool)
+    V, _ = pca_subspace(X, _pair(meta), allr, d=3)
+    _, means, _ = pair_means(X, _pair(meta), allr)
+    top = np.linalg.svd(means, full_matrices=False)[2][:3]
+    ov = np.linalg.svd(np.linalg.qr(V.T)[0].T @ np.linalg.qr(top.T)[0], compute_uv=False).min()
+    assert ov > 0.999
+
+
+def test_free_mode_can_start_where_the_fixed_mode_starts():
+    from extract.train import Extract, TrainConfig
+    V = np.random.default_rng(0).normal(size=(4, 30)).astype(np.float32)
+    kw = dict(n_genes=30, n_perturbations=5, n_contexts=2, subspace_basis=V)
+    fixed = Extract(config=TrainConfig(n_factors=4, subspace="fixed", axes_init="random", seed=3), **kw)
+    free = Extract(config=TrainConfig(n_factors=4, subspace="free", free_init="basis",
+                                      axes_init="random", seed=3), **kw)
+    assert torch.allclose(fixed.loadings.B, free.loadings.B, atol=1e-6)
+    assert "loadings.B" in dict(free.named_parameters())

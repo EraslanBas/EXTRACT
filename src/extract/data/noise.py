@@ -242,3 +242,33 @@ def rca_subspace_from_rows(
     pair = np.asarray(perturbation_idx, dtype=np.int64) * (int(np.max(context_idx)) + 1) \
         + np.asarray(context_idx, dtype=np.int64)
     return rca_subspace(X, pair, rows, d, rank=rank, seed=seed, is_real=is_real)[0]
+
+
+def pca_subspace(
+    X: np.ndarray, pair: np.ndarray, rows: np.ndarray, d: int,
+    is_real: np.ndarray | None = None, seed: int = 0,
+) -> tuple[np.ndarray, np.ndarray]:
+    """``(V [d, G], singular values [d])``: PCA of the pair means.
+
+    Each pair's measured rows (among ``rows``) are averaged, every row
+    counting the same; ``V`` holds the top ``d`` right singular vectors of the
+    pair-mean matrix (unit-norm rows). Not centred: zero is "no response" for
+    logFC, and centring would centre every gene. No noise model and no cell
+    counts. On the real screen this subspace is markedly more stable across
+    halves of the pairs than the signal-to-noise estimates.
+    """
+    from sklearn.utils.extmath import randomized_svd
+    _, means, _ = pair_means(X, pair, rows, is_real)
+    _, s, Vt = randomized_svd(means.astype(np.float32), d, n_iter=7, random_state=seed)
+    V = Vt / np.linalg.norm(Vt, axis=1, keepdims=True)
+    return V.astype(np.float32), s
+
+
+def pca_subspace_from_rows(
+    X: np.ndarray, perturbation_idx: np.ndarray, context_idx: np.ndarray,
+    rows: np.ndarray, d: int, seed: int = 0, is_real: np.ndarray | None = None,
+) -> np.ndarray:
+    """:func:`pca_subspace` with the pair key built from the label indices."""
+    pair = np.asarray(perturbation_idx, dtype=np.int64) * (int(np.max(context_idx)) + 1) \
+        + np.asarray(context_idx, dtype=np.int64)
+    return pca_subspace(X, pair, rows, d, is_real=is_real, seed=seed)[0]
