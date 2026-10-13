@@ -2,8 +2,9 @@
 """Frozen-axes test on the real screen: does EXTRACT's objective prefer the
 reproducible ICA axes over rotations of them?
 
-B is frozen; only the label network and head are trained. Arms (24, run one
-per job-array task with --arm i): data {nested, disjoint} x head variance
+B is frozen; only the label network and head are trained. Arms (36, run one
+per job-array task with --arm i): data {nested, disjoint, disjoint pseudobulks
+only} x head variance
 {shared, label} x frozen basis {V (PCA of pair means), ICA axes in span(V),
 ICA axes from another ICA seed, ICA axes mixed by expm(t S) with t = 0.5, 1, 2}.
 ICA is computed on the training pair means only. Everything else as in the
@@ -26,7 +27,9 @@ from extract.train import TrainConfig, control_mean_embeddings, fit, prepare
 
 R = Path("/large_storage/ctc/beraslan/ModuleFinder")
 SPLITS = {"nested": R / "splits/pair_seed0_ctxshuffle_pgenes",
-          "disjoint": R / "splits/pair_seed0_ctxshuffle_pgenes_disjoint"}
+          "disjoint": R / "splits/pair_seed0_ctxshuffle_pgenes_disjoint",
+          # disjoint pseudobulks only: no full row, so no two rows share a cell
+          "disjoint_pb": R / "splits/pair_seed0_ctxshuffle_pgenes_disjoint"}
 BASES = ["pca", "ica", "ica_seed1", "mix0.5", "mix1", "mix2"]
 ARMS = list(itertools.product(SPLITS, ["shared", "label"], BASES))
 
@@ -53,6 +56,9 @@ def main() -> None:
     t0 = time.time()
     levels = (0.2, 0.4, 0.6, 0.8, 1.0)
     X, m, genes = load_partition(SPLITS[data], "trainval", None, shuffled=True, shuffle_seed=0, shuffle_levels=levels)
+    if data == "disjoint_pb":                    # drop the full rows (and their synthetic twins)
+        pb = (m.variant == "subsample").to_numpy()
+        X, m = X[pb], m[pb].reset_index(drop=True)
     real = m.is_real.to_numpy()
     vp = set(_pair_key(m[real])[split_val_per_perturbation(m[real], 0.1, 0)])
     val_all = _pair_key(m).isin(vp).to_numpy()
