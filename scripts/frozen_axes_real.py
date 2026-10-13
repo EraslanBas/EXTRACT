@@ -26,10 +26,10 @@ from extract.data.splits import (_pair_key, load_partition, split_val_per_pertur
 from extract.train import TrainConfig, control_mean_embeddings, fit, prepare
 
 R = Path("/large_storage/ctc/beraslan/ModuleFinder")
-SPLITS = {"nested": R / "splits/pair_seed0_ctxshuffle_pgenes",
-          "disjoint": R / "splits/pair_seed0_ctxshuffle_pgenes_disjoint",
+SPLITS = {"nested": R / "splits/pair_seed0_ctxshuffle_pgenes_min100",
+          "disjoint": R / "splits/pair_seed0_ctxshuffle_pgenes_disjoint_min100",
           # disjoint pseudobulks only: no full row, so no two rows share a cell
-          "disjoint_pb": R / "splits/pair_seed0_ctxshuffle_pgenes_disjoint"}
+          "disjoint_pb": R / "splits/pair_seed0_ctxshuffle_pgenes_disjoint_min100"}
 BASES = ["pca", "ica", "ica_seed1", "mix0.5", "mix1", "mix2"]
 ARMS = list(itertools.product(SPLITS, ["shared", "label"], BASES))
 
