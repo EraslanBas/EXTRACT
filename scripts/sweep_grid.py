@@ -103,12 +103,17 @@ class _Queue:
             except (ProcessLookupError, PermissionError, ValueError):
                 return False
         if c.get("step"):
+            # Check the JOB, not the step: inside a batch script SLURM_STEP_ID
+            # is 0 while squeue lists the step as "<job>.batch", so a step
+            # check declared live claims dead and other workers re-trained
+            # them. A claim stays until its job ends; a worker that crashes
+            # inside a live job keeps its claim until then.
             job = c["step"].split(".")[0]
-            r = subprocess.run(["squeue", "-h", "-s", "-j", job, "-o", "%i"],
+            r = subprocess.run(["squeue", "-h", "-j", job, "-o", "%i"],
                                capture_output=True, text=True)
             if r.returncode != 0:
                 return True        # cannot tell: keep the claim
-            return c["step"] in r.stdout.split()
+            return job in r.stdout.split()
         return True                # other host, no step: cannot tell
 
     def clear_stale(self) -> None:
