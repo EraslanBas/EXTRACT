@@ -300,6 +300,7 @@ def build_split(
     shuffle_within: str = "context",
     keep_perturbed_genes: bool = False,
     control_label: str = "non-targeting",
+    gene_list=None,
 ) -> dict:
     """Draw the test pairs, then write both partitions. Returns the manifest.
 
@@ -364,6 +365,15 @@ def build_split(
     tv_main = meta_all[(meta_all.variant == "main") & ~_pair_key(meta_all).isin(held)]
     gl = gene_list_table(counts, tv_main, min_affected, threshold,
                          out_dir / "gene_list.tsv")
+    if gene_list is not None:
+        # keep exactly these genes (e.g. another split's list, so that two
+        # matrices sets are compared on the same genes)
+        forced = set(map(str, gene_list))
+        missing = forced - set(gl.gene.astype(str))
+        if missing:
+            raise ValueError(f"{len(missing)} genes of gene_list not in the matrices, e.g. {sorted(missing)[:3]}")
+        gl["keep"] = gl.gene.astype(str).isin(forced)
+        gl.to_csv(out_dir / "gene_list.tsv", sep="\t", index=False)
     n_filter = int(gl.keep.sum())
     if keep_perturbed_genes:
         targets = set(meta_all.perturbation.astype(str)) - {control_label}
