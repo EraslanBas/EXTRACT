@@ -237,6 +237,9 @@ def main() -> int:
     ap.add_argument("--pert-embedding-init", choices=["random", "response"], default="random",
                     help="start perturbation embeddings at random or from how each target "
                          "gene responds across the training pairs; response adds _embresp")
+    ap.add_argument("--head-variance", choices=["shared", "label"], default="shared",
+                    help="distance head: one variance per factor, or predicted per label "
+                         "and factor; label adds _hvar to the tag")
     ap.add_argument("--sparsity", type=float, default=0.0,
                    help="weight of the activity-sparsity penalty (0 = off); adds _sparse<w> to the tag")
     ap.add_argument("--head", default="statistics", choices=["statistics", "distance"],
@@ -379,6 +382,7 @@ def main() -> int:
                    if args.free_init == "basis" else "") if sub == "free"
                   else {"snr": "_snr", "pca": "_pca"}.get(args.subspace_method, f"_rca{args.rca_rank}"))
                + ("_dist" if args.head == "distance" else "")
+               + ("_hvar" if args.head_variance == "label" else "")
                + (f"_lwd{args.label_weight_decay:g}" if args.label_weight_decay else "")
                + (f"_ldo{args.label_dropout:g}" if args.label_dropout else "")
                + ("_embresp" if args.pert_embedding_init == "response" else "")
@@ -416,7 +420,7 @@ def main() -> int:
                           min_epochs=args.min_epochs,
                           select_on=args.select_on, subspace=sub, basis=head,
                           axes_init=args.axes_init, label_model=args.label_model, head=args.head,
-                          sparsity=args.sparsity,
+                          sparsity=args.sparsity, head_variance=args.head_variance,
                           subspace_method=args.subspace_method, rca_rank=args.rca_rank,
                           free_init=args.free_init, pert_embedding_init=args.pert_embedding_init,
                           embedding_dim=args.embedding_dim,
@@ -475,7 +479,7 @@ def main() -> int:
         fa["synth_level"] = synth_level
         row = {"tag": tag, "d": d, "alpha": a, "beta": b, "K": K, "seed": seed,
                "subspace": sub, "head_basis": ",".join(head), "basis": (bname if named else ("V" if sub != "free" else "")),
-               "label_model": args.label_model, "head": args.head, "sparsity": args.sparsity,
+               "label_model": args.label_model, "head": args.head, "head_variance": args.head_variance, "sparsity": args.sparsity,
                "subspace_method": args.subspace_method, "rca_rank": args.rca_rank,
                "free_init": args.free_init, "pert_embedding_init": args.pert_embedding_init,
                "embedding_dim": args.embedding_dim, "context_embedding_dim": args.context_embedding_dim,

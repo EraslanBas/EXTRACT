@@ -146,20 +146,36 @@ class DistanceHead(nn.Module):
     components, like :class:`PerComponentHead`. It uses nothing but ``z`` and
     the label -- in particular not the row's cell count, which a model applied
     to new data cannot rely on.
+
+    With ``label_variance`` the label also predicts each program's spread:
+
+        log sigma_k^2(u) = 2 log_sigma_k + tau * tanh(t_k(u)),
+        logit = b - sum_k [ (z_k - zhat_k(u))^2 / (2 sigma_k^2(u)) + log sigma_k^2(u) / 2 ],
+
+    the Gaussian log-likelihood with a label-dependent mean and variance per
+    factor (the iVAE form). ``lam`` then carries ``[zhat, t]`` per factor.
+    ``tau`` bounds the label effect (``log 10``: at most 10x more or less
+    variable than the baseline); ``t = 0`` reproduces the shared-variance head
+    up to a constant. The ``log sigma^2 / 2`` term is what stops a label from
+    claiming a large variance for free.
     """
 
-    n_basis = 1
-
-    def __init__(self, n_factors: int):
+    def __init__(self, n_factors: int, label_variance: bool = False, tau: float = 2.302585):
         super().__init__()
         self.log_sigma = nn.Parameter(torch.zeros(n_factors))
         self.bias = nn.Parameter(torch.zeros(1))
+        self.label_variance = label_variance
+        self.tau = tau
+        self.n_basis = 2 if label_variance else 1
 
     def evidence(self, z: torch.Tensor, lam: torch.Tensor) -> torch.Tensor:
         """``-e_k`` per factor, [batch, n_factors]."""
-        if lam.shape != (*z.shape, 1):
-            raise ValueError(f"lam has shape {tuple(lam.shape)}, expected {(*z.shape, 1)}")
-        return -(z - lam[..., 0]) ** 2 / (2 * torch.exp(2 * self.log_sigma))
+        if lam.shape != (*z.shape, self.n_basis):
+            raise ValueError(f"lam has shape {tuple(lam.shape)}, expected {(*z.shape, self.n_basis)}")
+        if not self.label_variance:
+            return -(z - lam[..., 0]) ** 2 / (2 * torch.exp(2 * self.log_sigma))
+        logvar = 2 * self.log_sigma + self.tau * torch.tanh(lam[..., 1])
+        return -((z - lam[..., 0]) ** 2 / (2 * torch.exp(logvar)) + 0.5 * logvar)
 
     def forward(self, z: torch.Tensor, lam: torch.Tensor) -> torch.Tensor:
         return self.evidence(z, lam).sum(dim=1) + self.bias

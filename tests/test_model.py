@@ -269,6 +269,27 @@ def test_response_embeddings_use_training_pairs_and_skip_own_knockdown():
     assert np.allclose(np.abs(E), np.abs(response_embeddings(X3, p, c, target, train, n_pert, dim=4)[0]), atol=1e-5)
 
 
+def test_label_variance_head_is_the_gaussian_log_likelihood():
+    head = DistanceHead(3, label_variance=True, tau=1.0)
+    with torch.no_grad():
+        head.log_sigma.copy_(torch.log(torch.tensor([1.0, 2.0, 0.5]))); head.bias.fill_(0.7)
+    z = torch.tensor([[2.0, 0.1, -1.0]])
+    lam = torch.tensor([[[1.8, 0.3], [0.0, -2.0], [-0.9, 0.0]]])
+    logvar = 2 * head.log_sigma + torch.tanh(lam[..., 1])
+    expect = 0.7 - ((z - lam[..., 0]) ** 2 / (2 * logvar.exp()) + 0.5 * logvar).sum(1)
+    assert torch.allclose(head(z, lam), expect)
+    with pytest.raises(ValueError):
+        head(z, lam[..., :1])
+
+
+def test_fit_runs_with_the_label_variance_head():
+    X, p, c, s, n = _toy_dataset()
+    cfg = TrainConfig(n_factors=5, epochs=4, batch_size=64, log_every=0, seed=0, head="distance",
+                      head_variance="label", noise_rank=3, axes_init="random")
+    model, history = fit(X, p, c, config=cfg)
+    assert model.head.n_basis == 2 and history[-1]["disc"] < history[0]["disc"]
+
+
 def test_fit_runs_with_label_regularisation():
     X, p, c, s, n = _toy_dataset()
     cfg = TrainConfig(n_factors=5, epochs=4, batch_size=64, log_every=0, seed=0, head="distance",

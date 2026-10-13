@@ -149,6 +149,11 @@ class TrainConfig:
     #: activities zhat (``basis`` is then unused). See models.heads.
     head: str = "statistics"
 
+    #: Distance head only: ``"shared"`` (one learned variance per factor) or
+    #: ``"label"`` (the label network also predicts each factor's variance,
+    #: within a factor of 10 of the baseline; see models.heads.DistanceHead).
+    head_variance: str = "shared"
+
     #: Regularisation of the label network against memorising training pairs:
     #: decoupled (AdamW) weight decay on its parameters only, and dropout on
     #: its embeddings and hidden layer (MLP label model). 0 = off.
@@ -260,7 +265,9 @@ class Extract(nn.Module):
         if config.head == "distance":
             if config.unconstrained_head:
                 raise ValueError("unconstrained_head is an ablation of the statistics head")
-            self.head = DistanceHead(config.n_factors)
+            if config.head_variance not in ("shared", "label"):
+                raise ValueError(f"head_variance must be 'shared' or 'label', got {config.head_variance!r}")
+            self.head = DistanceHead(config.n_factors, label_variance=config.head_variance == "label")
         else:
             self.head = (
                 UnconstrainedHead(config.n_factors, len(config.basis))
