@@ -437,8 +437,20 @@ def main() -> int:
                  B=np.stack([snaps[e] for e in ep]).astype(np.float32))
         # the selected model's parameters, and its validation scores, for ROC
         # curves and any later re-scoring
+        # everything needed to re-score the model later: the selected and the
+        # last epoch's parameters, and the configuration they were trained with
         torch.save({k: v.detach().cpu() for k, v in model.state_dict().items()},
-                   args.out_dir/f"model_{tag}.pt")
+                   args.out_dir/f"model_best_{tag}.pt")
+        torch.save(model.final_state_, args.out_dir/f"model_final_{tag}.pt")
+        import dataclasses
+        (args.out_dir/f"config_{tag}.json").write_text(json.dumps(
+            {**{k: (list(v) if isinstance(v, tuple) else v) for k, v in dataclasses.asdict(cfg).items()},
+             "selected_epoch": int(model.selected_epoch_), "final_epoch": int(model.final_epoch_),
+             "n_perturbations": int(fa["perturbation_idx"].max()) + 1,
+             "n_contexts": int(fa["context_idx"].max()) + 1, "n_genes": int(fa["X"].shape[1]),
+             "split_dir": str(args.split_dir), "tag": tag}, indent=1, default=str))
+        np.save(args.out_dir/f"levels_{tag}.npy",
+                np.array([plev, clev], dtype=object), allow_pickle=True)
         np.savez(args.out_dir/f"val_scores_{tag}.npz",
                  **_val_scores(model, fa, np.nonzero(val)[0], is_real, synth_level))
 

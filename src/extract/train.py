@@ -806,7 +806,8 @@ def fit(
         # the quantity actually minimised, eq. (12). Logged so the epoch where
         # val turns up while train keeps falling -- the overfitting onset -- is
         # readable from one column rather than reconstructed from two.
-        record["total"] = record["disc"] + config.alpha * record["recon"]
+        record["total"] = (record["disc"] + config.alpha * record["recon"]
+                           + config.sparsity * record["sparsity"])
         is_last = epoch == config.epochs - 1
         evaluated = False
         if val_idx is not None and config.eval_every and (
@@ -833,7 +834,8 @@ def fit(
                 }
             )
             record["val_total"] = (record["val_disc"]
-                                   + config.alpha * record["val_recon"])
+                                   + config.alpha * record["val_recon"]
+                                   + config.sparsity * record["val_sparsity"])
             score = record[f"val_{config.select_on}"]
             improved = (
                 best["score"] is None
@@ -881,6 +883,10 @@ def fit(
             )
             break
 
+    # the last epoch's parameters, kept before the best ones are restored
+    model.final_state_ = {k: v.detach().cpu().clone() for k, v in model.state_dict().items()}
+    model.final_epoch_ = len(history) - 1
+    model.selected_epoch_ = best["epoch"]
     if best["state"] is not None:
         model.load_state_dict(best["state"])
         print(
@@ -989,6 +995,7 @@ def evaluate(
          "wsq_syn", "w_syn"], 0.0)
     n_pos = n_syn = 0
     residuals = []
+    pos_all, perm_all, syn_all, syn_lv, z_real = [], [], [], [], []
     lv_all = (np.asarray(synth_level, dtype=float) if synth_level is not None else None)
     per_level: dict[float, list[float]] = {}     # level -> [ok, n, wsq, w]
 
@@ -1021,6 +1028,8 @@ def evaluate(
             t["perm_ok"] += float((perm <= 0).sum())
             t["perm_bce"] += _bce_sum(perm, 0.0)
             t["perm_sum"] += float(perm.sum())
+            pos_all.append(pos.cpu().numpy()); perm_all.append(perm.cpu().numpy())
+            z_real.append(z.cpu().numpy())
 
             per_row = model.loadings.squared_error(x, z, cols)
             w = (row_weights[idx_t].to(device) if row_weights is not None
@@ -1044,6 +1053,8 @@ def evaluate(
             t["syn_ok"] += float((syn <= 0).sum())
             t["syn_bce"] += _bce_sum(syn, 0.0)
             t["syn_sum"] += float(syn.sum())
+            syn_all.append(syn.cpu().numpy())
+            syn_lv.append(lv_all[idx] if lv_all is not None else np.full(len(idx), np.nan))
             per_row_s = model.loadings.squared_error(
                 X_t[idx_t].to(device), z, cols)
             w_s = (row_weights[idx_t].to(device) if row_weights is not None
@@ -1064,7 +1075,21 @@ def evaluate(
     model.train(was_training)
     r = np.concatenate(residuals)
     nan = float("nan")
+    from sklearn.metrics import roc_auc_score
+    P, N = np.concatenate(pos_all), np.concatenate(perm_all)
+    auc = lambda a, b: float(roc_auc_score(np.r_[np.ones(len(a)), np.zeros(len(b))], np.r_[a, b]))
+    aucs = {"auc": auc(P, N)}
+    if syn_all:
+        S, L = np.concatenate(syn_all), np.concatenate(syn_lv)
+        aucs["auc_synth"] = auc(P, S)
+        for f in np.unique(L[~np.isnan(L)]):
+            aucs[f"auc_synth_f{f:g}"] = auc(P, S[L == f])
+    Z = np.concatenate(z_real)
+    # the sparsity term exactly as training computes it, over the measured rows
+    val_sparsity = float((np.abs(Z) / (Z.std(0, ddof=1) + 1e-8)).mean(0).sum()) if len(Z) > 1 else nan
     return {
+        **aucs,
+        "sparsity": val_sparsity,
         "n_rows": int(n_pos),
         "n_synthetic": int(n_syn),
         "accuracy": (t["pos_ok"] + t["perm_ok"]) / (2 * n_pos),
@@ -1190,3 +1215,27 @@ __all__ = [
     "reconstruct",
     "NO_MASK",
 ]
+
+
+def load_model(sweep_dir, tag: str, which: str = "best", device: str = "cpu") -> Extract:
+    """Rebuild a model saved by ``scripts/sweep_grid.py`` from
+    ``config_<tag>.json`` and ``model_<which>_<tag>.pt`` (``which`` is
+    ``"best"``, the selected epoch, or ``"final"``, the last one). The fixed
+    subspace V is part of the saved state, so nothing else is needed; score
+    rows with ``model.project`` / ``model.score`` after encoding their labels
+    with ``levels_<tag>.npy`` (perturbation and context levels)."""
+    import dataclasses, json
+    from pathlib import Path
+    sweep_dir = Path(sweep_dir)
+    cfg_d = json.loads((sweep_dir / f"config_{tag}.json").read_text())
+    names = {f.name for f in dataclasses.fields(TrainConfig)}
+    kw = {k: (tuple(v) if k == "basis" else v) for k, v in cfg_d.items() if k in names}
+    kw["device"] = device
+    config = TrainConfig(**kw)
+    state = torch.load(sweep_dir / f"model_{which}_{tag}.pt", map_location=device)
+    # any basis of the right shape will do: the saved state overwrites it
+    basis = (state["loadings.V"] if "loadings.V" in state else state["loadings.B"]).numpy()
+    model = Extract(n_genes=cfg_d["n_genes"], n_perturbations=cfg_d["n_perturbations"],
+                    n_contexts=cfg_d["n_contexts"], config=config, subspace_basis=basis)
+    model.load_state_dict(state)
+    return model.to(device).eval()
