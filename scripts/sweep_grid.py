@@ -130,6 +130,39 @@ class _Queue:
                     p.unlink(missing_ok=True)
 
 
+def _val_scores(model, fa, rows, is_real, synth_level, batch=4096, seed=12345) -> dict:
+    """Discriminator logits on the validation rows: measured rows under their
+    own label (``pos``) and under a permuted label (``perm``, drawn as in
+    training), and synthetic rows under their own label (``syn``, with their
+    shuffled fraction ``syn_level``)."""
+    device = next(model.parameters()).device
+    real = rows[is_real[rows]]; syn = rows[~is_real[rows]]
+    sampler = StratifiedNegativeSampler(
+        perturbation_idx=fa["perturbation_idx"][real], context_idx=fa["context_idx"][real],
+        stratum=np.zeros(len(real), dtype=np.int64),
+        n_perturbations=int(fa["perturbation_idx"].max()) + 1,
+        n_contexts=int(fa["context_idx"].max()) + 1,
+        weights={"same_s_other_pert": 0.5, "same_s_other_context": 0.5})
+    neg_p, neg_c = sampler.sample(np.arange(len(real)), np.random.default_rng(seed))
+    model.eval()
+    t = lambda a: torch.from_numpy(np.asarray(a)).to(device)
+
+    def logits(idx, p, c):
+        out = []
+        with torch.no_grad():
+            for i in range(0, len(idx), batch):
+                j = idx[i:i + batch]
+                cols = t(fa["target_col"][j]) if fa.get("target_col") is not None else None
+                z = model.project(t(fa["X"][j]), cols)
+                out.append(model.score(z, t(p[i:i + batch]), t(c[i:i + batch])).cpu().numpy())
+        return np.concatenate(out) if out else np.zeros(0, np.float32)
+
+    return {"pos": logits(real, fa["perturbation_idx"][real], fa["context_idx"][real]),
+            "perm": logits(real, neg_p, neg_c),
+            "syn": logits(syn, fa["perturbation_idx"][syn], fa["context_idx"][syn]),
+            "syn_level": np.asarray(synth_level)[syn]}
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -402,6 +435,12 @@ def main() -> int:
         ep = np.array(sorted(snaps))
         np.savez(args.out_dir/f"B_evals_{tag}.npz", epoch=ep,
                  B=np.stack([snaps[e] for e in ep]).astype(np.float32))
+        # the selected model's parameters, and its validation scores, for ROC
+        # curves and any later re-scoring
+        torch.save({k: v.detach().cpu() for k, v in model.state_dict().items()},
+                   args.out_dir/f"model_{tag}.pt")
+        np.savez(args.out_dir/f"val_scores_{tag}.npz",
+                 **_val_scores(model, fa, np.nonzero(val)[0], is_real, synth_level))
 
         X_t = torch.from_numpy(fa["X"]); col_t = torch.from_numpy(fa["target_col"])
         w_t = None                                    # every row weighs the same
