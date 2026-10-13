@@ -252,12 +252,19 @@ def add_shuffle_levels(
     genes = [str(g) for g in load_gene_list(split_dir / "gene_list.tsv")]
     held = {f"{p}|{c}" for p, c in pd.read_csv(split_dir / "test_pairs.tsv", sep="\t")
             .astype(str).itertuples(index=False)}
+    # pairs build_split dropped (e.g. too few cells) are not in the split
+    dropped_path = split_dir / "dropped_pairs.tsv"
+    dropped = (set(pd.read_csv(dropped_path, sep="\t").pair.astype(str))
+               if dropped_path.exists() else set())
     for n in manifest["contexts"]:
         m = pd.read_csv(matrices_dir / f"{n}_row_metadata.csv")
         table = pq.read_table(matrices_dir / f"{n}_PosteriorMean.parquet",
                               columns=["label"] + genes).to_pandas()
         if not (table.label.to_numpy() == m.label.to_numpy()).all():
             raise ValueError(f"{n}: matrix and metadata row order disagree")
+        if dropped:
+            kept = ~_pair_key(m).isin(dropped).to_numpy()
+            m, table = m[kept].reset_index(drop=True), table[kept].reset_index(drop=True)
         in_test = _pair_key(m).isin(held).to_numpy()
         values = table[genes].to_numpy(dtype=np.float32)
         for k in seeds:
@@ -301,6 +308,7 @@ def build_split(
     keep_perturbed_genes: bool = False,
     control_label: str = "non-targeting",
     gene_list=None,
+    min_pair_cells: int = 0,
 ) -> dict:
     """Draw the test pairs, then write both partitions. Returns the manifest.
 
@@ -335,7 +343,9 @@ def build_split(
     names = [f.name.replace("_PosteriorMean.parquet", "") for f in found]
     if contexts:
         names = [n for n in names if n in set(contexts)]
-    metas = {n: pd.read_csv(matrices_dir / f"{n}_row_metadata.csv") for n in names}
+    # `_row`: each row's position in its matrix file, kept through any filtering
+    metas = {n: pd.read_csv(matrices_dir / f"{n}_row_metadata.csv").assign(
+        _row=lambda d: np.arange(len(d))) for n in names}
     meta_all = pd.concat(metas.values(), ignore_index=True)
 
     # ---- 1. the split, from metadata alone --------------------------------
@@ -345,12 +355,34 @@ def build_split(
     held = {f"{p}|{c}" for p, c in test_pairs}
     print(f"[split] {len(test_pairs):,} test pairs of "
           f"{meta_all.groupby(['perturbation', 'context']).ngroups:,}", flush=True)
+    # ---- 1b. drop unreliable pairs (few cells), AFTER the draw, so the test
+    # set stays a subset of the same held-out pairs --------------------------
+    dropped = set()
+    if min_pair_cells:
+        main_rows = meta_all[meta_all.variant == "main"]
+        low = main_rows.n_cells < min_pair_cells
+        dropped = set(_pair_key(main_rows[low]))
+        kept_tv = main_rows[~low & ~_pair_key(main_rows).isin(held)]
+        trained = set(kept_tv.perturbation.astype(str))
+        orphan = {k for k in held if k.split("|")[0] not in trained}
+        dropped |= orphan
+        held -= dropped
+        test_pairs = [(p, c) for p, c in test_pairs if f"{p}|{c}" in held]
+        pd.DataFrame(test_pairs, columns=["perturbation", "context"]).to_csv(
+            out_dir / "test_pairs.tsv", sep="\t", index=False)
+        pd.DataFrame(sorted(dropped), columns=["pair"]).to_csv(out_dir / "dropped_pairs.tsv",
+                                                               sep="\t", index=False)
+        metas = {n: mm[~_pair_key(mm).isin(dropped)].reset_index(drop=True) for n, mm in metas.items()}
+        meta_all = pd.concat(metas.values(), ignore_index=True)
+        print(f"[filter] dropped {int(low.sum()):,} pairs with < {min_pair_cells} cells and "
+              f"{len(orphan):,} test pairs whose perturbation had no training pair left; "
+              f"{len(test_pairs):,} test pairs remain", flush=True)
 
     # ---- 2. gene list from train/val full-data rows -----------------------
     counts, genes_all = None, None
     for n in names:
         m = metas[n]
-        rows = np.nonzero(((m.variant == "main") & ~_pair_key(m).isin(held)).to_numpy())[0]
+        rows = m["_row"].to_numpy()[((m.variant == "main") & ~_pair_key(m).isin(held)).to_numpy()]
         table = pq.read_table(matrices_dir / f"{n}_PosteriorMean.parquet").take(rows)
         genes = [c for c in table.column_names if c != "label"]
         if genes_all is None:
@@ -358,7 +390,7 @@ def build_split(
         elif genes != genes_all:
             raise ValueError(f"{n}: gene columns differ from {names[0]}")
         values = table.select(genes).to_pandas().to_numpy(dtype=np.float32)
-        c = affected_counts(values, m.iloc[rows], threshold=threshold, variant="main")
+        c = affected_counts(values, m.set_index("_row").loc[rows].reset_index(), threshold=threshold, variant="main")
         counts = c.to_numpy() if counts is None else counts + c.to_numpy()
         del table, values
     counts = pd.Series(counts, index=genes_all, name="n_affected")
@@ -397,7 +429,8 @@ def build_split(
     for n in names:
         m = metas[n].copy()
         table = pq.read_table(matrices_dir / f"{n}_PosteriorMean.parquet",
-                              columns=["label"] + genes).to_pandas()
+                              columns=["label"] + genes).take(m["_row"].to_numpy()).to_pandas()
+        m = m.drop(columns="_row")
         if not (table.label.to_numpy() == m.label.to_numpy()).all():
             raise ValueError(f"{n}: matrix and metadata row order disagree")
         in_test = _pair_key(m).isin(held).to_numpy()

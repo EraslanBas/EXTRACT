@@ -51,6 +51,9 @@ def main() -> None:
     p.add_argument("--keep-perturbed-genes", action="store_true",
                    help="also keep every measured perturbation target as a response "
                         "gene, whether or not it passes the filter")
+    p.add_argument("--min-pair-cells", type=int, default=0,
+                   help="drop (perturbation, context) pairs whose full-data row has fewer "
+                        "cells, from every partition (after the test draw)")
     p.add_argument("--gene-list", type=Path, default=None,
                    help="keep exactly the genes of this gene_list.tsv (keep column), "
                         "instead of the filter")
@@ -65,6 +68,7 @@ def main() -> None:
         threshold=args.threshold,
         shuffle_seeds=tuple(args.shuffle_seeds),
         keep_perturbed_genes=args.keep_perturbed_genes,
+        min_pair_cells=args.min_pair_cells,
         gene_list=(None if args.gene_list is None else
                    __import__("extract.data.gene_filter", fromlist=["load_gene_list"]).load_gene_list(args.gene_list)),
         contexts=args.contexts,
