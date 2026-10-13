@@ -112,7 +112,8 @@ class _Queue:
             r = subprocess.run(["squeue", "-h", "-j", job, "-o", "%i"],
                                capture_output=True, text=True)
             if r.returncode != 0:
-                return True        # cannot tell: keep the claim
+                # an ended job is "Invalid job id"; anything else: cannot tell
+                return "invalid job id" not in (r.stderr + r.stdout).lower()
             return job in r.stdout.split()
         return True                # other host, no step: cannot tell
 
