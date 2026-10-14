@@ -139,6 +139,13 @@ class GlobalLoadings(nn.Module):
             z[idx] = torch.linalg.solve(G, Bx[idx].unsqueeze(-1)).squeeze(-1)
         return z
 
+    @torch.no_grad()
+    def renormalize_rows_(self) -> None:
+        """Scale each program's loadings to unit length (in place). Needed when
+        the activities are penalised (group lasso): otherwise larger loadings
+        would shrink the activities and the penalty with no change to the fit."""
+        self.B.div_(self.B.norm(dim=1, keepdim=True).clamp_min(1e-12))
+
     # ---- reconstruction ---------------------------------------------------
 
     def reconstruct(self, z: torch.Tensor) -> torch.Tensor:
@@ -267,6 +274,11 @@ class FixedBasisLoadings(GlobalLoadings):
             self.A = nn.Parameter(A0)
         else:                     # "frozen": B = V exactly, a probe of V's axes
             self.register_buffer("A", torch.eye(self.n_factors))
+
+    @torch.no_grad()
+    def renormalize_rows_(self) -> None:
+        """Unit-length rows of ``B = A V``, by rescaling the rows of ``A``."""
+        self.A.div_((self.A @ self.V).norm(dim=1, keepdim=True).clamp_min(1e-12))
 
     @property
     def B(self) -> torch.Tensor:  # type: ignore[override]

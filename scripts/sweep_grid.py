@@ -146,16 +146,23 @@ def _val_scores(model, fa, rows, is_real, synth_level, batch=4096, seed=12345) -
     neg_p, neg_c = sampler.sample(np.arange(len(real)), np.random.default_rng(seed))
     model.eval()
     t = lambda a: torch.from_numpy(np.asarray(a)).to(device)
+    from extract.models.group_lasso import group_batches, group_keys
+    gkey = group_keys(fa["perturbation_idx"], fa["context_idx"], is_real)
+    lasso = model.config.coding == "group_lasso"
 
     def logits(idx, p, c):
-        out = []
+        # batches of whole (perturbation, context) pairs for the group lasso;
+        # the activities use the row's own pair, the score the label p, c
+        out = np.zeros(len(idx), np.float32)
+        parts = (group_batches(gkey[idx], batch) if lasso
+                 else [np.arange(i, min(i + batch, len(idx))) for i in range(0, len(idx), batch)])
         with torch.no_grad():
-            for i in range(0, len(idx), batch):
-                j = idx[i:i + batch]
+            for b in parts:
+                j = idx[b]
                 cols = t(fa["target_col"][j]) if fa.get("target_col") is not None else None
-                z = model.project(t(fa["X"][j]), cols)
-                out.append(model.score(z, t(p[i:i + batch]), t(c[i:i + batch])).cpu().numpy())
-        return np.concatenate(out) if out else np.zeros(0, np.float32)
+                z = model.project(t(fa["X"][j]), cols, t(gkey[j]) if lasso else None)
+                out[b] = model.score(z, t(p[b]), t(c[b])).cpu().numpy()
+        return out
 
     return {"pos": logits(real, fa["perturbation_idx"][real], fa["context_idx"][real]),
             "perm": logits(real, neg_p, neg_c),
@@ -240,6 +247,15 @@ def main() -> int:
     ap.add_argument("--head-variance", choices=["shared", "label"], default="shared",
                     help="distance head: one variance per factor, or predicted per label "
                          "and factor; label adds _hvar to the tag")
+    ap.add_argument("--coding", choices=["ls", "group_lasso"], default="ls",
+                    help="activities: masked least squares, or a group lasso with one selection "
+                         "of programs per (perturbation, context) pair; group_lasso adds "
+                         "_gl<lambda> to the tag")
+    ap.add_argument("--lasso-lambda", type=float, default=0.05)
+    ap.add_argument("--lasso-steps", type=int, default=30)
+    ap.add_argument("--no-lasso-refit", action="store_true",
+                    help="give the discriminator the raw lasso activities instead of the "
+                         "least-squares refit on the selected programs; adds _norefit")
     ap.add_argument("--sparsity", type=float, default=0.0,
                    help="weight of the activity-sparsity penalty (0 = off); adds _sparse<w> to the tag")
     ap.add_argument("--head", default="statistics", choices=["statistics", "distance"],
@@ -389,7 +405,9 @@ def main() -> int:
                + ("_ctxctrl" if args.context_embedding_init == "control-means" else "")
                + (f"_emb{args.embedding_dim}x{args.context_embedding_dim}"
                   if (args.embedding_dim, args.context_embedding_dim) != (32, 32) else "")
-               + (f"_sparse{args.sparsity:g}" if args.sparsity else ""))
+               + (f"_sparse{args.sparsity:g}" if args.sparsity else "")
+               + (f"_gl{args.lasso_lambda:g}" + ("_norefit" if args.no_lasso_refit else "")
+                  if args.coding == "group_lasso" else ""))
         # re-read each time: cheap, and means a cell finished by any earlier
         # or concurrent process is never repeated
         if queue is not None:
@@ -426,7 +444,9 @@ def main() -> int:
                           embedding_dim=args.embedding_dim,
                           context_embedding_dim=args.context_embedding_dim,
                           label_weight_decay=args.label_weight_decay,
-                          label_dropout=args.label_dropout)
+                          label_dropout=args.label_dropout,
+                          coding=args.coding, lasso_lambda=args.lasso_lambda,
+                          lasso_steps=args.lasso_steps, lasso_refit=not args.no_lasso_refit)
         snaps: dict[int, np.ndarray] = {}
         model, hist = fit(config=cfg, train_rows=~val, val_rows=val,
                           is_real=is_real, synth_level=synth_level,
@@ -485,6 +505,8 @@ def main() -> int:
                "embedding_dim": args.embedding_dim, "context_embedding_dim": args.context_embedding_dim,
                "context_embedding_init": args.context_embedding_init,
                "label_weight_decay": args.label_weight_decay, "label_dropout": args.label_dropout,
+               "coding": args.coding, "lasso_lambda": args.lasso_lambda,
+               "lasso_steps": args.lasso_steps, "lasso_refit": not args.no_lasso_refit,
                "epochs_run": len(hist), "seconds": round(time.time()-t, 1)}
         for name, rows_ in (("train", np.nonzero(~val)[0]), ("val", np.nonzero(val)[0])):
             m = score(fa, rows_, X_t, col_t, w_t)

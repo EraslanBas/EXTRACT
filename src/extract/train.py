@@ -154,6 +154,20 @@ class TrainConfig:
     #: within a factor of 10 of the baseline; see models.heads.DistanceHead).
     head_variance: str = "shared"
 
+    #: How a row's activities z are obtained. ``"ls"``: masked least squares
+    #: onto B. ``"group_lasso"``: all rows of a (perturbation, context) pair
+    #: share one selection of programs (models.group_lasso); the loadings are
+    #: kept at unit length and the reconstruction term becomes the lasso
+    #: objective (error + lasso_lambda * group penalty), so it prefers axes on
+    #: which each pair uses few programs -- also in the fixed mode. Batches are
+    #: built from whole pairs. Branch `group-lasso`, experimental.
+    coding: str = "ls"
+    lasso_lambda: float = 0.05
+    lasso_steps: int = 30
+    #: z handed to the discriminator: refitted least squares on the selected
+    #: programs (True) or the shrunken lasso activities (False).
+    lasso_refit: bool = True
+
     #: Regularisation of the label network against memorising training pairs:
     #: decoupled (AdamW) weight decay on its parameters only, and dropout on
     #: its embeddings and hidden layer (MLP label model). 0 = off.
@@ -296,10 +310,24 @@ class Extract(nn.Module):
     # ---- forward pieces ---------------------------------------------------
 
     def project(
-        self, x: torch.Tensor, target_col: torch.Tensor | None = None
+        self, x: torch.Tensor, target_col: torch.Tensor | None = None,
+        groups: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        """``z`` -- eq. (2)/(4). Masked when ``target_col`` is given."""
-        return self.loadings.project(x, target_col)
+        """``z`` -- eq. (2)/(4). Masked when ``target_col`` is given. With
+        ``coding="group_lasso"`` the group-lasso activities (``groups`` [n]:
+        one id per (perturbation, context, measured/synthetic)); the raw lasso
+        activities and the selection are kept in ``lasso_raw_`` / ``lasso_sel_``."""
+        z = self.loadings.project(x, target_col)
+        if self.config.coding == "ls":
+            return z
+        if groups is None:
+            raise ValueError("coding='group_lasso' needs the row groups")
+        from .models.group_lasso import group_lasso_codes, refit_codes
+        B = self.loadings.B
+        Z, sel = group_lasso_codes(x, B, groups, self.config.lasso_lambda, target_col,
+                                   z0=z.detach(), steps=self.config.lasso_steps, refit=False)
+        self.lasso_raw_, self.lasso_sel_ = Z, sel
+        return refit_codes(x, B, sel, target_col) if self.config.lasso_refit else Z
 
     def score(
         self,
@@ -613,6 +641,15 @@ def fit(
         if not is_real.any():
             raise ValueError("no real rows: L_recon would have nothing to fit")
 
+    if config.coding not in ("ls", "group_lasso"):
+        raise ValueError(f"coding must be 'ls' or 'group_lasso', got {config.coding!r}")
+    # one group per (perturbation, context, measured/synthetic): the rows that
+    # share a selection of programs under the group lasso
+    from .models.group_lasso import group_batches, group_keys
+    gkey = group_keys(perturbation_idx, context_idx, is_real)
+    gkey_t = torch.from_numpy(gkey).to(device)
+    if config.coding == "group_lasso":
+        model.loadings.renormalize_rows_()
     X_t = torch.from_numpy(X).to(device)
     w_t = torch.from_numpy(w.astype(np.float32)).to(device)
     real_t = torch.from_numpy(is_real).to(device)
@@ -668,10 +705,16 @@ def fit(
         order = rng.permutation(len(train_idx))
         totals = {"disc": 0.0, "recon": 0.0, "recon_measured": 0.0,
                   "recon_synth": 0.0, "tc": 0.0, "sparsity": 0.0, "accuracy": 0.0}
+        if config.coding == "group_lasso":
+            totals.update(lasso_penalty=0.0, programs_per_pair=0.0)
         n_batches = 0
+        if config.coding == "group_lasso":
+            # batches of whole groups, so each pair's rows are solved together
+            batches = group_batches(gkey[train_idx], config.batch_size, rng)
+        else:
+            batches = [order[s:s + config.batch_size] for s in range(0, len(train_idx), config.batch_size)]
 
-        for start in range(0, len(train_idx), config.batch_size):
-            local = order[start : start + config.batch_size]
+        for local in batches:
             if len(local) < 2:
                 continue
             rows = train_idx[local]          # positions in X
@@ -681,7 +724,10 @@ def fit(
             cols = col_t[rows_t] if col_t is not None else None
             neg_p, neg_c = sampler.sample(local, rng)
 
-            z = model.project(x, cols)                       # eq. (4)
+            z = model.project(x, cols, gkey_t[rows_t])        # eq. (4)
+            # the reconstruction term uses the raw lasso activities (the lasso
+            # objective); the discriminator uses z
+            z_rec = model.lasso_raw_ if config.coding == "group_lasso" else z
             neg_p_t = torch.from_numpy(neg_p).to(device)
             neg_c_t = torch.from_numpy(neg_c).to(device)
 
@@ -743,14 +789,28 @@ def fit(
                 return cols[m] if cols is not None else None
 
             if all_real:
-                per_row = model.loadings.squared_error(x, z, cols)
+                per_row = model.loadings.squared_error(x, z_rec, cols)
                 loss_r = weighted_squared_error(per_row, w_t[rows_t])
             elif bool(keep.any()):
                 per_row = model.loadings.squared_error(
-                    x[keep], z[keep], _sub_cols(keep))
+                    x[keep], z_rec[keep], _sub_cols(keep))
                 loss_r = weighted_squared_error(per_row, w_t[rows_t][keep])
             else:
                 loss_r = torch.zeros((), device=device)
+            if config.coding == "group_lasso" and bool(keep.any()):
+                # the lasso objective 1/2 |r|^2 + lam * penalty, times 2 / (n G)
+                # to match the error term (a mean over rows of |r|^2 / G)
+                from .models.group_lasso import group_penalty
+                pen = 2.0 * group_penalty(z_rec[keep], gkey_t[rows_t][keep], config.lasso_lambda) / (
+                    int(keep.sum()) * x.shape[1])
+                loss_r = loss_r + pen
+                totals["lasso_penalty"] += float(pen)
+                sel = model.lasso_sel_[keep]
+                gk = gkey_t[rows_t][keep]
+                first = torch.ones_like(gk, dtype=torch.bool)
+                srt, idx = torch.sort(gk)
+                first[idx[1:]] = srt[1:] != srt[:-1]
+                totals["programs_per_pair"] += float(sel[first].sum(1).float().mean())
 
             # Keep the two halves as well as the combined term. The combined
             # value is what is minimised and is the right single number to
@@ -762,7 +822,7 @@ def fit(
             loss_r_synth = torch.zeros((), device=device)
             if bool(synth.any()):
                 per_row_f = model.loadings.squared_error(
-                    x[synth], z[synth], _sub_cols(synth))
+                    x[synth], z_rec[synth], _sub_cols(synth))
                 loss_r_synth = weighted_squared_error(
                     per_row_f, w_t[rows_t][synth])
                 if config.recon_fake_weight:
@@ -787,6 +847,8 @@ def fit(
             if config.grad_clip:
                 torch.nn.utils.clip_grad_norm_(model.parameters(), config.grad_clip)
             optimiser.step()
+            if config.coding == "group_lasso":
+                model.loadings.renormalize_rows_()
 
             if tc_disc is not None:
                 z_det = z.detach()
@@ -1005,9 +1067,17 @@ def evaluate(
     pos_all, perm_all, syn_all, syn_lv, z_real = [], [], [], [], []
     lv_all = (np.asarray(synth_level, dtype=float) if synth_level is not None else None)
     per_level: dict[float, list[float]] = {}     # level -> [ok, n, wsq, w]
+    lasso = model.config.coding == "group_lasso"
+    if lasso:
+        from .models.group_lasso import group_batches, group_keys, group_penalty
+        gkey = group_keys(perturbation_idx[rows], context_idx[rows], real_rows)
+        batches = group_batches(gkey, batch_size)
+        t.update(lasso_raw_sq=0.0, lasso_pen=0.0, n_groups=0.0, n_programs=0.0)
+    else:
+        batches = [np.arange(s, min(s + batch_size, len(rows)))
+                   for s in range(0, len(rows), batch_size)]
 
-    for start in range(0, len(rows), batch_size):
-        local = np.arange(start, min(start + batch_size, len(rows)))
+    for local in batches:
         keep = real_rows[local]
         local_real, local_syn = local[keep], local[~keep]
 
@@ -1017,7 +1087,15 @@ def evaluate(
             x = X_t[idx_t].to(device)
             cols = (target_col[idx_t].to(device)
                     if target_col is not None else None)
-            z = model.project(x, cols)
+            z = model.project(x, cols, torch.from_numpy(gkey[local_real]).to(device)
+                              if lasso else None)
+            if lasso:
+                g_t = torch.from_numpy(gkey[local_real]).to(device)
+                t["lasso_raw_sq"] += float(model.loadings.squared_error(x, model.lasso_raw_, cols).sum())
+                t["lasso_pen"] += float(group_penalty(model.lasso_raw_, g_t, model.config.lasso_lambda))
+                _, first = np.unique(gkey[local_real], return_index=True)
+                t["n_groups"] += len(first)
+                t["n_programs"] += float(model.lasso_sel_[torch.from_numpy(first).to(device)].sum())
             pos = model.score(
                 z,
                 torch.from_numpy(perturbation_idx[idx]).to(device),
@@ -1051,7 +1129,8 @@ def evaluate(
             idx_t = torch.from_numpy(idx).to(src)
             cols = (target_col[idx_t].to(device)
                     if target_col is not None else None)
-            z = model.project(X_t[idx_t].to(device), cols)
+            z = model.project(X_t[idx_t].to(device), cols,
+                              torch.from_numpy(gkey[local_syn]).to(device) if lasso else None)
             syn = model.score(                     # its OWN label: a negative
                 z,
                 torch.from_numpy(perturbation_idx[idx]).to(device),
@@ -1094,6 +1173,12 @@ def evaluate(
     Z = np.concatenate(z_real)
     # the sparsity term exactly as training computes it, over the measured rows
     val_sparsity = float((np.abs(Z) / (Z.std(0, ddof=1) + 1e-8)).mean(0).sum()) if len(Z) > 1 else nan
+    if lasso:
+        n_genes = X_t.shape[1]
+        aucs["programs_per_pair"] = t["n_programs"] / max(t["n_groups"], 1)
+        # the lasso objective per row and gene, as in training (squared_error
+        # is the per-row mean over genes)
+        aucs["lasso_objective"] = (t["lasso_raw_sq"] + 2.0 * t["lasso_pen"] / n_genes) / max(n_pos, 1)
     return {
         **aucs,
         "sparsity": val_sparsity,
@@ -1182,9 +1267,11 @@ def prepare(
 
 @torch.no_grad()
 def encode(
-    model: Extract, X: np.ndarray, target_col: np.ndarray | None = None
+    model: Extract, X: np.ndarray, target_col: np.ndarray | None = None,
+    groups: np.ndarray | None = None,
 ) -> np.ndarray:
-    """Factor activations ``Z`` for all rows of ``X``."""
+    """Factor activations ``Z`` for all rows of ``X`` (``groups``: the rows'
+    group ids, needed with ``coding="group_lasso"``; see ``group_keys``)."""
     model.eval()
     device = next(model.parameters()).device
     x = torch.from_numpy(np.asarray(X, dtype=np.float32)).to(device)
@@ -1193,12 +1280,14 @@ def encode(
         if target_col is not None
         else None
     )
-    return model.project(x, cols).cpu().numpy()
+    g = torch.from_numpy(np.asarray(groups, dtype=np.int64)).to(device) if groups is not None else None
+    return model.project(x, cols, g).cpu().numpy()
 
 
 @torch.no_grad()
 def reconstruct(
-    model: Extract, X: np.ndarray, target_col: np.ndarray | None = None
+    model: Extract, X: np.ndarray, target_col: np.ndarray | None = None,
+    groups: np.ndarray | None = None,
 ) -> np.ndarray:
     """``X_hat = z B`` with ``z`` the masked projection of ``X``."""
     model.eval()
@@ -1209,7 +1298,8 @@ def reconstruct(
         if target_col is not None
         else None
     )
-    return model.loadings.reconstruct(model.project(x, cols)).cpu().numpy()
+    g = torch.from_numpy(np.asarray(groups, dtype=np.int64)).to(device) if groups is not None else None
+    return model.loadings.reconstruct(model.project(x, cols, g)).cpu().numpy()
 
 
 __all__ = [
