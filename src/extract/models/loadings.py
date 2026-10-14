@@ -244,7 +244,10 @@ def initial_axes(d: int, axes_init: str = "identity", seed: int = 0) -> torch.Te
     """Starting ``A`` [d, d] for ``B = A V``: the identity, or a random rotation
     drawn from ``seed`` (different for every seed, so that cross-seed agreement
     cannot come from a shared starting point)."""
-    if axes_init == "identity":
+    if axes_init == "identity" or axes_init == "jd":
+        # "jd": the axes are computed from the data (extract.train.jd_axes) and
+        # passed in; the identity is only a placeholder that load_state_dict
+        # overwrites when a saved model is rebuilt
         return torch.eye(d)
     if axes_init == "random":
         Q, _ = np.linalg.qr(np.random.default_rng(seed).normal(size=(d, d)))
@@ -263,13 +266,14 @@ class FixedBasisLoadings(GlobalLoadings):
     """
 
     def __init__(self, V: np.ndarray, ridge: float = 1e-4, learn_axes: bool = True,
-                 axes_init: str = "identity", seed: int = 0):
+                 axes_init: str = "identity", seed: int = 0, A0: torch.Tensor | None = None):
         nn.Module.__init__(self)
         V = torch.as_tensor(np.asarray(V), dtype=torch.float32)
         self.n_factors, self.n_genes = V.shape
         self.ridge = ridge
         self.register_buffer("V", V)
-        A0 = initial_axes(self.n_factors, axes_init, seed)
+        if A0 is None:
+            A0 = initial_axes(self.n_factors, axes_init, seed)
         if learn_axes:
             self.A = nn.Parameter(A0)
         else:                     # "frozen": B = V exactly, a probe of V's axes

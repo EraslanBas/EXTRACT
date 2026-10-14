@@ -226,9 +226,13 @@ def main() -> int:
                     help="statistics the head applies to each factor, one comma-"
                          "separated set per grid value, e.g. abs  linear,abs. "
                          "Non-default sets add _head-<names> to the tag")
-    ap.add_argument("--axes-init", default="identity", choices=["identity", "random"],
-                    help="fixed mode: start A at the identity or at a random rotation "
-                         "(per seed); random adds _Arandom to the tag")
+    ap.add_argument("--axes-init", default="identity", choices=["identity", "random", "jd"],
+                    help="fixed mode: start A at the identity, at a random rotation "
+                         "(per seed; adds _Arandom) or at the joint-diagonalisation axes "
+                         "of the per-context covariances (adds _Ajd)")
+    ap.add_argument("--axes-init-jitter", type=float, default=0.0,
+                    help="with --axes-init jd: rotate the JD axes by expm(t S), S random per "
+                         "seed; adds _jit<t>")
     ap.add_argument("--label-weight-decay", type=float, default=0.0,
                     help="AdamW weight decay on the label network only; adds _lwd<x>")
     ap.add_argument("--label-dropout", type=float, default=0.0,
@@ -393,6 +397,8 @@ def main() -> int:
                + (f"_{bname}" if named else "")
                + ("" if head == ("linear", "square", "abs", "tanh") else f"_head-{'-'.join(head)}")
                + ("_Arandom" if args.axes_init == "random" and sub == "fixed" else "")
+               + (("_Ajd" + (f"_jit{args.axes_init_jitter:g}" if args.axes_init_jitter else ""))
+                  if args.axes_init == "jd" and sub == "fixed" else "")
                + ("" if args.label_model == "mlp" else f"_{args.label_model}")
                + ((f"_initV{args.subspace_method}" + ("_Arandom" if args.axes_init == "random" else "")
                    if args.free_init == "basis" else "") if sub == "free"
@@ -445,6 +451,7 @@ def main() -> int:
                           context_embedding_dim=args.context_embedding_dim,
                           label_weight_decay=args.label_weight_decay,
                           label_dropout=args.label_dropout,
+                          axes_init_jitter=args.axes_init_jitter,
                           coding=args.coding, lasso_lambda=args.lasso_lambda,
                           lasso_steps=args.lasso_steps, lasso_refit=not args.no_lasso_refit)
         snaps: dict[int, np.ndarray] = {}
@@ -505,6 +512,7 @@ def main() -> int:
                "embedding_dim": args.embedding_dim, "context_embedding_dim": args.context_embedding_dim,
                "context_embedding_init": args.context_embedding_init,
                "label_weight_decay": args.label_weight_decay, "label_dropout": args.label_dropout,
+               "axes_init": args.axes_init, "axes_init_jitter": args.axes_init_jitter,
                "coding": args.coding, "lasso_lambda": args.lasso_lambda,
                "lasso_steps": args.lasso_steps, "lasso_refit": not args.no_lasso_refit,
                "epochs_run": len(hist), "seconds": round(time.time()-t, 1)}

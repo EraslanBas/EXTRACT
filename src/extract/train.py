@@ -131,9 +131,16 @@ class TrainConfig:
     noise_rank: int = 50
     noise_max_rows: int = 150_000
 
-    #: Starting axes A in the fixed model: ``"identity"`` (B starts at V) or
-    #: ``"random"`` (a random rotation of V's axes, drawn from ``seed``).
+    #: Starting axes A in the fixed model: ``"identity"`` (B starts at V),
+    #: ``"random"`` (a random rotation of V's axes, drawn from ``seed``) or
+    #: ``"jd"`` (the joint-diagonalisation axes of the per-context covariances
+    #: of the training pair means inside V; see :func:`jd_axes`).
     axes_init: str = "identity"
+    #: With ``axes_init="jd"``: rotate the JD axes by ``expm(t S)``, ``S`` a
+    #: random skew-symmetric matrix of unit spectral norm drawn from ``seed``,
+    #: so seeds start at different points near the JD axes (0 = all seeds start
+    #: at the JD axes).
+    axes_init_jitter: float = 0.0
 
     #: How labels map to the head's coefficients lambda. ``"mlp"``: embeddings
     #: of p and c through an MLP, unconstrained (does not fix the axes).
@@ -243,8 +250,10 @@ class Extract(nn.Module):
         config: TrainConfig,
         subspace_basis: np.ndarray | None = None,
         noise_model=None,
+        axes0: np.ndarray | None = None,
     ):
         super().__init__()
+        A0 = None if axes0 is None else torch.as_tensor(np.asarray(axes0), dtype=torch.float32)
         self.config = config
         if config.subspace not in ("free", "fixed", "anchored", "frozen"):
             raise ValueError(f"unknown subspace mode {config.subspace!r}")
@@ -257,13 +266,14 @@ class Extract(nn.Module):
         if config.subspace in ("fixed", "frozen"):
             self.loadings = FixedBasisLoadings(subspace_basis, ridge=config.ridge,
                                                learn_axes=config.subspace == "fixed",
-                                               axes_init=config.axes_init, seed=config.seed)
+                                               axes_init=config.axes_init, seed=config.seed, A0=A0)
         else:
             self.loadings = GlobalLoadings(config.n_factors, n_genes, ridge=config.ridge)
             if config.subspace == "free" and config.free_init == "basis":
                 if subspace_basis is None:
                     raise ValueError("free_init='basis' needs subspace_basis")
-                A0 = initial_axes(config.n_factors, config.axes_init, config.seed)
+                if A0 is None:
+                    A0 = initial_axes(config.n_factors, config.axes_init, config.seed)
                 with torch.no_grad():
                     self.loadings.B.copy_(A0 @ torch.as_tensor(np.asarray(subspace_basis), dtype=torch.float32))
             elif config.subspace == "free" and config.free_init != "random":
@@ -364,6 +374,54 @@ class Extract(nn.Module):
         ``interpret.loadings`` for sign anchoring, which is required before any
         directional claim."""
         return self.loadings.B.detach().cpu().numpy()
+
+
+def jd_axes(
+    X: np.ndarray, perturbation_idx: np.ndarray, context_idx: np.ndarray,
+    rows: np.ndarray, V: np.ndarray, is_real: np.ndarray | None = None,
+    jitter: float = 0.0, seed: int = 0,
+) -> np.ndarray:
+    """Starting axes ``A0`` [d, d] for ``B = A0 V``: the joint-diagonalisation
+    axes of the per-context covariances of the training pair means, inside the
+    span of V.
+
+    The pair means are written in an orthonormal basis Q of V's span, ``y``.
+    For every context, the covariance of ``y`` over its pairs (centred within
+    the context) is ``S_c``; with ``W = (mean_c S_c)^{-1/2}``, an orthogonal
+    ``U`` makes every ``W S_c W`` as diagonal as possible (Jacobi joint
+    diagonalisation). The programs are the columns of the mixing ``W^{-1} U``,
+    i.e. ``B = U^T W^{-1} Q^T``, rows scaled to unit length. Uses the measured
+    training rows only. ``jitter > 0`` rotates the axes by ``expm(jitter S)``
+    (S random skew-symmetric, unit spectral norm, from ``seed``)."""
+    from scipy.linalg import expm
+    from baselines.joint_diagonalization import joint_diagonalize
+    from .data.noise import pair_means
+    rows = np.nonzero(rows)[0] if np.asarray(rows).dtype == bool else np.asarray(rows)
+    n_c = int(context_idx.max()) + 1
+    keys, means, _ = pair_means(X, perturbation_idx * n_c + context_idx, rows, is_real)
+    ctx = keys % n_c
+    V = np.asarray(V, dtype=np.float64)
+    Q = np.linalg.qr(V.T)[0]                                     # [G, d]
+    Y = means @ Q
+    covs = []
+    for c in np.unique(ctx):
+        Yc = Y[ctx == c]
+        if len(Yc) > V.shape[0]:
+            Yc = Yc - Yc.mean(0)
+            covs.append(Yc.T @ Yc / len(Yc))
+    if len(covs) < 2:
+        raise ValueError("jd_axes needs at least two contexts with more pairs than factors")
+    ev, E = np.linalg.eigh(np.mean(covs, 0))
+    W = E @ np.diag(ev ** -0.5) @ E.T
+    U, _ = joint_diagonalize(np.stack([W @ S @ W for S in covs]))
+    Bq = U.T @ np.linalg.inv(W)                                  # rows: programs in Q coordinates
+    if jitter:
+        S = np.random.default_rng(seed).normal(size=Bq.shape[:1] * 2)
+        S = (S - S.T) / 2
+        Bq = expm(jitter * S / np.linalg.norm(S, 2)) @ Bq
+    B = Bq @ Q.T
+    B /= np.linalg.norm(B, axis=1, keepdims=True)
+    return (B @ np.linalg.pinv(V)).astype(np.float32)          # A0 with A0 V = B
 
 
 def response_embeddings(
@@ -574,6 +632,14 @@ def fit(
             print(f"label-driven subspace: d={config.n_factors} ({what}), from the "
                   f"training rows", flush=True)
 
+    axes0 = None
+    if config.axes_init == "jd":
+        if subspace_basis is None:
+            raise ValueError("axes_init='jd' needs a subspace basis (fixed mode or free_init='basis')")
+        axes0 = jd_axes(X, perturbation_idx, context_idx, train_idx, subspace_basis,
+                        is_real=is_real, jitter=config.axes_init_jitter, seed=config.seed)
+    elif config.axes_init_jitter:
+        raise ValueError("axes_init_jitter needs axes_init='jd'")
     model = Extract(
         n_genes=n_genes,
         n_perturbations=n_perturbations,
@@ -581,6 +647,7 @@ def fit(
         config=config,
         subspace_basis=subspace_basis,
         noise_model=noise_model,
+        axes0=axes0,
     ).to(device)
     if config.pert_embedding_init == "response":
         if not isinstance(model.label_net, FactorizedLabelNet):
