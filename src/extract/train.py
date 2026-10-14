@@ -698,7 +698,7 @@ def fit(
     history: list[dict] = []
     best = {"score": None, "epoch": -1, "state": None}
     since_best = 0
-    higher_is_better = config.select_on == "accuracy"
+    higher_is_better = config.select_on in ("accuracy", "auc")
 
     for epoch in range(config.epochs):
         model.train()

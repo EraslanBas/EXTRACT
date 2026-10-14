@@ -197,7 +197,7 @@ def main() -> int:
     ap.add_argument("--val-seed", type=int, default=0)
     ap.add_argument("--draw-seed", type=int, default=0)
     ap.add_argument("--select-on", default="accuracy",
-                    choices=["total", "accuracy", "disc", "recon"],
+                    choices=["total", "accuracy", "disc", "recon", "auc"],
                     help="validation metric early stopping selects on. "
                          "accuracy (default): val BCE rises from epoch ~0-3 "
                          "as the head grows over-confident while val "
