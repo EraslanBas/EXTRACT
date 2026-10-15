@@ -422,6 +422,9 @@ def main() -> int:
                + (f"_sparse{args.sparsity:g}" if args.sparsity else "")
                + ((f"_gs{args.gene_sparsity:g}" + (f"_k{args.gene_topk}" if args.gene_topk != 200 else ""))
                   if args.gene_sparsity else "")
+               # only permuted-label negatives (no shuffled rows): one per measured row
+               + ("_noshuf" if args.shuffled_frac == 0 else
+                  f"_sf{args.shuffled_frac:g}" if args.shuffled_frac != 0.5 else "")
                + (f"_gl{args.lasso_lambda:g}" + ("_norefit" if args.no_lasso_refit else "")
                   if args.coding == "group_lasso" else ""))
         # re-read each time: cheap, and means a cell finished by any earlier
@@ -524,7 +527,7 @@ def main() -> int:
                "context_embedding_init": args.context_embedding_init,
                "label_weight_decay": args.label_weight_decay, "label_dropout": args.label_dropout,
                "axes_init": args.axes_init, "axes_init_jitter": args.axes_init_jitter,
-               "head_normaliser": args.head_normaliser,
+               "head_normaliser": args.head_normaliser, "shuffled_frac": args.shuffled_frac,
                "gene_sparsity": args.gene_sparsity, "gene_topk": args.gene_topk,
                "coding": args.coding, "lasso_lambda": args.lasso_lambda,
                "lasso_steps": args.lasso_steps, "lasso_refit": not args.no_lasso_refit,
