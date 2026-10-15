@@ -109,7 +109,10 @@ class _Queue:
             # them. A claim stays until its job ends; a worker that crashes
             # inside a live job keeps its claim until then.
             job = c["step"].split(".")[0]
-            r = subprocess.run(["squeue", "-h", "-j", job, "-o", "%i"],
+            # "%A" is the job's own id, also for array tasks (whose "%i" is
+            # "<array job>_<task>" and never equals SLURM_JOB_ID, so array
+            # workers' claims were declared dead and re-trained)
+            r = subprocess.run(["squeue", "-h", "-j", job, "-o", "%A"],
                                capture_output=True, text=True)
             if r.returncode != 0:
                 # an ended job is "Invalid job id"; anything else: cannot tell
