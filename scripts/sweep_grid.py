@@ -260,6 +260,10 @@ def main() -> int:
     ap.add_argument("--no-lasso-refit", action="store_true",
                     help="give the discriminator the raw lasso activities instead of the "
                          "least-squares refit on the selected programs; adds _norefit")
+    ap.add_argument("--gene-sparsity", type=float, default=0.0,
+                    help="weight gamma of the gene-side prior: sum_k (1 - share of program k's "
+                         "weight in its --gene-topk genes); adds _gs<gamma> (and _k<k> if not 200)")
+    ap.add_argument("--gene-topk", type=int, default=200)
     ap.add_argument("--sparsity", type=float, default=0.0,
                    help="weight of the activity-sparsity penalty (0 = off); adds _sparse<w> to the tag")
     ap.add_argument("--head", default="statistics", choices=["statistics", "distance"],
@@ -416,6 +420,8 @@ def main() -> int:
                + (f"_emb{args.embedding_dim}x{args.context_embedding_dim}"
                   if (args.embedding_dim, args.context_embedding_dim) != (32, 32) else "")
                + (f"_sparse{args.sparsity:g}" if args.sparsity else "")
+               + ((f"_gs{args.gene_sparsity:g}" + (f"_k{args.gene_topk}" if args.gene_topk != 200 else ""))
+                  if args.gene_sparsity else "")
                + (f"_gl{args.lasso_lambda:g}" + ("_norefit" if args.no_lasso_refit else "")
                   if args.coding == "group_lasso" else ""))
         # re-read each time: cheap, and means a cell finished by any earlier
@@ -456,6 +462,7 @@ def main() -> int:
                           label_weight_decay=args.label_weight_decay,
                           label_dropout=args.label_dropout,
                           axes_init_jitter=args.axes_init_jitter, head_normaliser=args.head_normaliser,
+                          gene_sparsity=args.gene_sparsity, gene_topk=args.gene_topk,
                           coding=args.coding, lasso_lambda=args.lasso_lambda,
                           lasso_steps=args.lasso_steps, lasso_refit=not args.no_lasso_refit)
         snaps: dict[int, np.ndarray] = {}
@@ -518,6 +525,7 @@ def main() -> int:
                "label_weight_decay": args.label_weight_decay, "label_dropout": args.label_dropout,
                "axes_init": args.axes_init, "axes_init_jitter": args.axes_init_jitter,
                "head_normaliser": args.head_normaliser,
+               "gene_sparsity": args.gene_sparsity, "gene_topk": args.gene_topk,
                "coding": args.coding, "lasso_lambda": args.lasso_lambda,
                "lasso_steps": args.lasso_steps, "lasso_refit": not args.no_lasso_refit,
                "epochs_run": len(hist), "seconds": round(time.time()-t, 1)}

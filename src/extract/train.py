@@ -200,6 +200,13 @@ class TrainConfig:
     #: stops A from lowering it by rescaling a factor. 0 = off.
     sparsity: float = 0.0
 
+    #: Gene-side prior: a program involves few genes. gamma *
+    #: sum_k (1 - share of B_k's squared loading in its ``gene_topk`` largest
+    #: genes), a prior on the programs alone (no data rows), acting on A in
+    #: the fixed mode. 0 = off.
+    gene_sparsity: float = 0.0
+    gene_topk: int = 200
+
     #: Ablation only: replaces the per-component head with an MLP, which
     #: destroys identifiability. See models.heads.UnconstrainedHead.
     unconstrained_head: bool = False
@@ -782,6 +789,7 @@ def fit(
                   "recon_synth": 0.0, "tc": 0.0, "sparsity": 0.0, "accuracy": 0.0}
         if config.coding == "group_lasso":
             totals.update(lasso_penalty=0.0, programs_per_pair=0.0)
+        totals.update(gene_penalty=0.0, gene_top_share=0.0)
         n_batches = 0
         if config.coding == "group_lasso":
             # batches of whole groups, so each pair's rows are solved together
@@ -911,6 +919,15 @@ def fit(
                 if len(zf) > 1:
                     loss_s = (zf.abs() / (zf.std(0) + 1e-8)).mean(0).sum()
                     loss = loss + config.sparsity * loss_s
+
+            # gene-side prior on the programs: few genes per program
+            from .models.loadings import gene_concentration
+            share = gene_concentration(model.loadings.B, config.gene_topk)
+            loss_g = (1.0 - share).sum()
+            if config.gene_sparsity:
+                loss = loss + config.gene_sparsity * loss_g
+            totals["gene_penalty"] += float(loss_g)
+            totals["gene_top_share"] += float(share.mean())
 
             loss_tc = torch.zeros((), device=device)
             if tc_disc is not None:

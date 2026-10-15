@@ -240,6 +240,15 @@ class GlobalLoadings(nn.Module):
         return num / torch.linalg.norm(x, dim=1).clamp_min(1e-12)
 
 
+def gene_concentration(B: torch.Tensor, k: int = 200) -> torch.Tensor:
+    """[n_factors] share of each program's squared loading in its ``k``
+    largest-|loading| genes (1 = the program lives entirely in k genes).
+    The top set is re-chosen from the current B; gradients flow through the
+    loadings' values. Raw loadings, no gene scaling."""
+    sq = B * B
+    return torch.topk(sq, min(k, sq.shape[1]), dim=1).values.sum(1) / sq.sum(1).clamp_min(1e-20)
+
+
 def initial_axes(d: int, axes_init: str = "identity", seed: int = 0) -> torch.Tensor:
     """Starting ``A`` [d, d] for ``B = A V``: the identity, or a random rotation
     drawn from ``seed`` (different for every seed, so that cross-seed agreement
