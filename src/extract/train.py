@@ -155,6 +155,10 @@ class TrainConfig:
     #: zhat_k(u))^2 / (2 sigma_k^2), with the label model predicting the
     #: activities zhat (``basis`` is then unused). See models.heads.
     head: str = "statistics"
+    #: Statistics head only: the label also predicts a per-program term
+    #: c_k(u) subtracted from the score, standing in for the normaliser
+    #: -log Z(lambda(u)) that the plain statistics head lacks.
+    head_normaliser: bool = False
 
     #: Distance head only: ``"shared"`` (one learned variance per factor) or
     #: ``"label"`` (the label network also predicts each factor's variance,
@@ -296,9 +300,13 @@ class Extract(nn.Module):
             self.head = (
                 UnconstrainedHead(config.n_factors, len(config.basis))
                 if config.unconstrained_head
-                else PerComponentHead(config.basis)
+                else PerComponentHead(config.basis, normaliser=config.head_normaliser)
             )
-        n_basis = self.head.n_basis if config.head == "distance" else len(config.basis)
+        if config.head_normaliser and (config.head != "statistics" or config.unconstrained_head):
+            raise ValueError("head_normaliser is for the statistics head")
+        n_basis = (self.head.n_basis if config.head == "distance"
+                   else self.head.n_outputs if isinstance(self.head, PerComponentHead)
+                   else len(config.basis))
         if config.label_model in ("product", "ammi"):
             net = ProductLabelNet if config.label_model == "product" else AMMILabelNet
             self.label_net = net(n_perturbations, n_contexts,
@@ -362,7 +370,7 @@ class Extract(nn.Module):
         lam = self.label_net(perturbation_idx, context_idx)
         if isinstance(self.head, DistanceHead):
             return self.head.evidence(z, lam)
-        return (lam * self.head.statistics(z)).sum(dim=-1)
+        return self.head.evidence(z, lam)
 
     @property
     def B(self) -> torch.Tensor:

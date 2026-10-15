@@ -265,6 +265,9 @@ def main() -> int:
     ap.add_argument("--head", default="statistics", choices=["statistics", "distance"],
                    help="discriminator head: per-factor statistics (default) or the distance "
                         "between measured and predicted activity; distance adds _dist to the tag")
+    ap.add_argument("--head-normaliser", action="store_true",
+                    help="statistics head: the label also predicts a per-program term c_k(p, c) "
+                         "subtracted from the score (a learned normaliser); adds _norm to the tag")
     ap.add_argument("--label-model", default="mlp", choices=["mlp", "product", "ammi"],
                     help="label -> lambda map: unconstrained MLP, the structured "
                          "product f(p) * g(c), or ammi a(p) + b(c) + f(p) * g(c); "
@@ -404,6 +407,7 @@ def main() -> int:
                    if args.free_init == "basis" else "") if sub == "free"
                   else {"snr": "_snr", "pca": "_pca"}.get(args.subspace_method, f"_rca{args.rca_rank}"))
                + ("_dist" if args.head == "distance" else "")
+               + ("_norm" if args.head_normaliser else "")
                + ("_hvar" if args.head_variance == "label" else "")
                + (f"_lwd{args.label_weight_decay:g}" if args.label_weight_decay else "")
                + (f"_ldo{args.label_dropout:g}" if args.label_dropout else "")
@@ -451,7 +455,7 @@ def main() -> int:
                           context_embedding_dim=args.context_embedding_dim,
                           label_weight_decay=args.label_weight_decay,
                           label_dropout=args.label_dropout,
-                          axes_init_jitter=args.axes_init_jitter,
+                          axes_init_jitter=args.axes_init_jitter, head_normaliser=args.head_normaliser,
                           coding=args.coding, lasso_lambda=args.lasso_lambda,
                           lasso_steps=args.lasso_steps, lasso_refit=not args.no_lasso_refit)
         snaps: dict[int, np.ndarray] = {}
@@ -513,6 +517,7 @@ def main() -> int:
                "context_embedding_init": args.context_embedding_init,
                "label_weight_decay": args.label_weight_decay, "label_dropout": args.label_dropout,
                "axes_init": args.axes_init, "axes_init_jitter": args.axes_init_jitter,
+               "head_normaliser": args.head_normaliser,
                "coding": args.coding, "lasso_lambda": args.lasso_lambda,
                "lasso_steps": args.lasso_steps, "lasso_refit": not args.no_lasso_refit,
                "epochs_run": len(hist), "seconds": round(time.time()-t, 1)}
