@@ -967,8 +967,10 @@ def fit(
         # the quantity actually minimised, eq. (12). Logged so the epoch where
         # val turns up while train keeps falling -- the overfitting onset -- is
         # readable from one column rather than reconstructed from two.
+        # (recon already holds the lasso penalty under the group lasso)
         record["total"] = (record["disc"] + config.alpha * record["recon"]
-                           + config.sparsity * record["sparsity"])
+                           + config.sparsity * record["sparsity"]
+                           + config.gene_sparsity * record["gene_penalty"])
         is_last = epoch == config.epochs - 1
         evaluated = False
         if val_idx is not None and config.eval_every and (
@@ -991,12 +993,19 @@ def fit(
                         is_real=is_real,
                         recon_fake_weight=config.recon_fake_weight,
                         synth_level=synth_level,
+                        perm_keep=p_keep_perm,
                     ).items()
                 }
             )
-            record["val_total"] = (record["val_disc"]
-                                   + config.alpha * record["val_recon"]
-                                   + config.sparsity * record["val_sparsity"])
+            # the training objective on the validation rows, term by term
+            from .models.loadings import gene_concentration
+            with torch.no_grad():
+                record["val_gene_penalty"] = float(
+                    (1.0 - gene_concentration(model.loadings.B, config.gene_topk)).sum())
+            record["val_total"] = (record["val_disc_objective"]
+                                   + config.alpha * record.get("val_recon_objective", record["val_recon"])
+                                   + config.sparsity * record["val_sparsity"]
+                                   + config.gene_sparsity * record["val_gene_penalty"])
             score = record[f"val_{config.select_on}"]
             improved = (
                 best["score"] is None
@@ -1076,6 +1085,7 @@ def evaluate(
     recon_fake_weight: float = 0.0,
     batch_size: int = 2048,
     synth_level: np.ndarray | None = None,
+    perm_keep: float = 1.0,
 ) -> dict:
     """Metrics on held-out rows, scored exactly as training scores them.
 
@@ -1164,7 +1174,7 @@ def evaluate(
         from .models.group_lasso import group_batches, group_keys, group_penalty
         gkey = group_keys(perturbation_idx[rows], context_idx[rows], real_rows)
         batches = group_batches(gkey, batch_size)
-        t.update(lasso_raw_sq=0.0, lasso_pen=0.0, n_groups=0.0, n_programs=0.0)
+        t.update(lasso_raw_sq=0.0, lasso_pen=0.0, n_groups=0.0, n_programs=0.0, lasso_raw_sq_syn=0.0)
     else:
         batches = [np.arange(s, min(s + batch_size, len(rows)))
                    for s in range(0, len(rows), batch_size)]
@@ -1223,6 +1233,9 @@ def evaluate(
                     if target_col is not None else None)
             z = model.project(X_t[idx_t].to(device), cols,
                               torch.from_numpy(gkey[local_syn]).to(device) if lasso else None)
+            if lasso:
+                t["lasso_raw_sq_syn"] += float(model.loadings.squared_error(
+                    X_t[idx_t].to(device), model.lasso_raw_, cols).sum())
             syn = model.score(                     # its OWN label: a negative
                 z,
                 torch.from_numpy(perturbation_idx[idx]).to(device),
@@ -1271,6 +1284,11 @@ def evaluate(
         # the lasso objective per row and gene, as in training (squared_error
         # is the per-row mean over genes)
         aucs["lasso_objective"] = (t["lasso_raw_sq"] + 2.0 * t["lasso_pen"] / n_genes) / max(n_pos, 1)
+        # the reconstruction term exactly as training minimises it: the lasso
+        # objective of the measured rows minus beta x the raw error of the
+        # synthetic rows
+        aucs["recon_objective"] = aucs["lasso_objective"] - recon_fake_weight * (
+            t["lasso_raw_sq_syn"] / n_syn if n_syn else 0.0)
     return {
         **aucs,
         "sparsity": val_sparsity,
@@ -1284,6 +1302,12 @@ def evaluate(
         "disc_synth": (
             t["pos_bce"] / n_pos + t["syn_bce"] / n_syn if n_syn else nan
         ),
+        # the discriminator loss exactly as training minimises it: mean BCE of
+        # the positives + mean BCE of the negatives, the permuted ones kept at
+        # the training share ``perm_keep`` alongside the synthetic ones
+        "disc_objective": (t["pos_bce"] / n_pos
+                           + (perm_keep * t["perm_bce"] + t["syn_bce"])
+                           / max(perm_keep * n_pos + n_syn, 1e-12)),
         "recon_measured": t["wsq"] / max(t["w"], 1e-12),
         "recon_synth": (t["wsq_syn"] / t["w_syn"]) if t["w_syn"] else nan,
         # the combined objective, the same quantity training minimises
