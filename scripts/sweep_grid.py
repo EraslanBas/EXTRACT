@@ -199,6 +199,10 @@ def main() -> int:
                          "the number of synthetic rows is unchanged, validation "
                          "and test report accuracy per level. Default: 1.0 only")
     ap.add_argument("--val-frac", type=float, default=0.1)
+    ap.add_argument("--perturbation-half", type=int, choices=[0, 1], default=None,
+                    help="train and validate on one random half of the perturbations only "
+                         "(all their pairs); adds _half<h>s<seed> to the tag")
+    ap.add_argument("--half-seed", type=int, default=0, help="seed of the perturbation halving")
     ap.add_argument("--val-seed", type=int, default=0)
     ap.add_argument("--draw-seed", type=int, default=0)
     ap.add_argument("--select-on", default="auc",
@@ -336,6 +340,12 @@ def main() -> int:
     Xtv, mtv, genes = load_partition(args.split_dir, "trainval", None,
                                      shuffled=True, shuffle_seed=0,
                                      shuffle_levels=levels)
+    if args.perturbation_half is not None:
+        from extract.data.splits import perturbation_half
+        keep_h = perturbation_half(mtv.perturbation.to_numpy(), args.perturbation_half, args.half_seed)
+        Xtv, mtv = Xtv[keep_h], mtv[keep_h].reset_index(drop=True)
+        print(f"perturbation half {args.perturbation_half} (seed {args.half_seed}): "
+              f"{mtv.perturbation.nunique():,} perturbations", flush=True)
     real = mtv.is_real.to_numpy()
     val_real = split_val_per_perturbation(mtv[real], args.val_frac, args.val_seed)
     val_pairs = set(_pair_key(mtv[real])[val_real])
@@ -431,7 +441,9 @@ def main() -> int:
                + ("_noshuf" if args.shuffled_frac == 0 else
                   f"_sf{args.shuffled_frac:g}" if args.shuffled_frac != 0.5 else "")
                + (f"_gl{args.lasso_lambda:g}" + ("_norefit" if args.no_lasso_refit else "")
-                  if args.coding == "group_lasso" else ""))
+                  if args.coding == "group_lasso" else "")
+               + (f"_half{args.perturbation_half}s{args.half_seed}"
+                  if args.perturbation_half is not None else ""))
         # re-read each time: cheap, and means a cell finished by any earlier
         # or concurrent process is never repeated
         if queue is not None:

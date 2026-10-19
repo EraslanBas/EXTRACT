@@ -295,3 +295,14 @@ def test_evaluate_reports_each_shuffle_level(tmp_path):
     keys = {k for k in hist[-1] if k.startswith("val_synth_accuracy_f")}
     assert keys == {f"val_synth_accuracy_f{f:g}" for f in SHUFFLE_LEVELS}
     assert all(0.0 <= hist[-1][k] <= 1.0 for k in keys)
+
+
+def test_perturbation_halves_partition_the_perturbations():
+    from extract.data.splits import perturbation_half
+    perts = np.repeat([f"G{i}" for i in range(41)], 3)          # 3 contexts per perturbation
+    h0, h1 = perturbation_half(perts, 0, seed=1), perturbation_half(perts, 1, seed=1)
+    assert (h0 ^ h1).all()                                       # every row in exactly one half
+    assert not set(perts[h0]) & set(perts[h1])                   # no perturbation in both
+    assert abs(len(set(perts[h0])) - len(set(perts[h1]))) <= 1
+    assert (perturbation_half(perts[::-1], 0, seed=1) == h0[::-1]).all()   # depends on names, not order
+    assert not (perturbation_half(perts, 0, seed=2) == h0).all()

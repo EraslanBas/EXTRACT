@@ -104,6 +104,22 @@ def draw_test_pairs(
     return sorted(chosen)
 
 
+def perturbation_half(perturbations, half: int, seed: int = 0) -> np.ndarray:
+    """Boolean mask of the rows whose perturbation is in one random half of the
+    perturbations (``half`` 0 or 1). The halves partition the perturbations:
+    every pair of a perturbation, in every context, goes to the same half, so
+    models trained on the two halves never see a common perturbation. The
+    assignment depends only on the set of perturbation names and ``seed``."""
+    if half not in (0, 1):
+        raise ValueError(f"half must be 0 or 1, got {half}")
+    perts = np.asarray(perturbations).astype(str)
+    names = np.unique(perts)
+    order = np.random.default_rng(seed).permutation(len(names))
+    first = set(names[order[: len(names) // 2]])
+    in_first = np.isin(perts, list(first))
+    return in_first if half == 0 else ~in_first
+
+
 def split_val_per_perturbation(
     meta: pd.DataFrame, val_frac: float = 0.1, seed: int = 0
 ) -> np.ndarray:
