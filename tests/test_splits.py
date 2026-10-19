@@ -288,7 +288,7 @@ def test_evaluate_reports_each_shuffle_level(tmp_path):
     vp = set(_pair_key(m[real])[split_val_per_perturbation(m[real], 0.15, 0)])
     val = _pair_key(m).isin(vp).to_numpy()
     fa = prepare(X, m, genes); fa.pop("perturbation_levels"); fa.pop("context_levels")
-    cfg = TrainConfig(n_factors=3, epochs=2, batch_size=64, eval_every=1,
+    cfg = TrainConfig(pert_embedding_init="random", n_factors=3, epochs=2, batch_size=64, eval_every=1,
                       patience=0, log_every=0, select_on="accuracy")
     _, hist = fit(config=cfg, train_rows=~val, val_rows=val, is_real=real,
                   synth_level=m.shuffle_frac.to_numpy(dtype=float), **fa)

@@ -36,7 +36,7 @@ def test_penalty_raises_gene_concentration_in_fit():
     X, p, c = _data()
     shares = {}
     for g in (0.0, 5.0):
-        cfg = TrainConfig(n_factors=3, epochs=40, batch_size=64, log_every=0, seed=0, head="statistics",
+        cfg = TrainConfig(pert_embedding_init="random", n_factors=3, epochs=40, batch_size=64, log_every=0, seed=0, head="statistics",
                           subspace="fixed", subspace_method="pca", axes_init="random", noise_rank=2,
                           gene_sparsity=g, gene_topk=8, lr=1e-2)
         model, hist = fit(X, p, c, config=cfg)
@@ -48,7 +48,7 @@ def test_penalty_raises_gene_concentration_in_fit():
 def test_val_total_is_the_training_objective_term_by_term():
     X, p, c = _data()
     val = np.zeros(len(X), bool); val[::5] = True
-    cfg = TrainConfig(n_factors=3, epochs=3, batch_size=64, log_every=0, seed=0, head="statistics",
+    cfg = TrainConfig(pert_embedding_init="random", n_factors=3, epochs=3, batch_size=64, log_every=0, seed=0, head="statistics",
                       head_normaliser=True, subspace="fixed", subspace_method="pca", axes_init="random",
                       noise_rank=2, eval_every=1, coding="group_lasso", lasso_lambda=0.05, lasso_steps=10,
                       gene_sparsity=0.5, gene_topk=8, select_on="auc")

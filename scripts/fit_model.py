@@ -43,6 +43,7 @@ from extract.data.splits import (
     thin_synthetic,
 )
 from extract.objectives import DEFAULT_WEIGHTS, StratifiedNegativeSampler
+from extract.models.group_lasso import group_keys
 from extract.train import TrainConfig, encode, evaluate, fit, prepare
 
 
@@ -230,7 +231,10 @@ def main() -> None:
 
     B = model.loading_matrix()
     np.save(out_dir / f"B_{tag}.npy", B)
-    np.save(out_dir / f"Z_{tag}.npy", encode(model, fit_args["X"], fit_args["target_col"]))
+    # the group lasso solves each (perturbation, context) pair's rows together
+    np.save(out_dir / f"Z_{tag}.npy", encode(
+        model, fit_args["X"], fit_args["target_col"],
+        groups=group_keys(fit_args["perturbation_idx"], fit_args["context_idx"], is_real)))
     meta.assign(val=val).to_csv(out_dir / f"rows_{tag}.csv", index=False)
     pd.DataFrame(history).to_csv(out_dir / f"history_{tag}.csv", index=False)
     del fit_args
@@ -247,7 +251,9 @@ def main() -> None:
     del Xte
     metrics["test"] = _metrics(fa_te, np.arange(len(mte)),
                                mte.is_real.to_numpy(), "TEST")
-    np.save(out_dir / f"Z_test_{tag}.npy", encode(model, fa_te["X"], fa_te["target_col"]))
+    np.save(out_dir / f"Z_test_{tag}.npy", encode(
+        model, fa_te["X"], fa_te["target_col"],
+        groups=group_keys(fa_te["perturbation_idx"], fa_te["context_idx"], mte.is_real.to_numpy())))
 
     print(f"\n  accuracy: train {metrics['train']['accuracy']:.4f}  "
           f"val {metrics['val']['accuracy']:.4f}  test {metrics['test']['accuracy']:.4f}"

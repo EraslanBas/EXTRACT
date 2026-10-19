@@ -97,7 +97,7 @@ def test_fit_and_evaluate_with_the_group_lasso(subspace):
     X2, p2, c2 = np.r_[X, Xs], np.r_[p, p], np.r_[c, c]
     is_real = np.r_[is_real, np.zeros(len(X), bool)]
     val = np.zeros(len(X2), bool); val[::5] = True
-    cfg = TrainConfig(n_factors=4, epochs=6, batch_size=50, log_every=0, seed=0, head="distance",
+    cfg = TrainConfig(pert_embedding_init="random", n_factors=4, epochs=6, batch_size=50, log_every=0, seed=0, head="distance",
                       subspace=subspace, axes_init="random", noise_rank=2, eval_every=3,
                       coding="group_lasso", lasso_lambda=0.05, lasso_steps=10)
     model, history = fit(X2, p2, c2, config=cfg, train_rows=~val, val_rows=val, is_real=is_real)

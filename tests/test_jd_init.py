@@ -48,7 +48,7 @@ def test_jitter_moves_the_axes_by_seed():
 
 def test_fit_starts_at_the_jd_axes():
     X, p, c, B, V = _context_variance_data(n_p=60)
-    cfg = TrainConfig(n_factors=5, epochs=0, batch_size=128, log_every=0, seed=0, head="distance",
+    cfg = TrainConfig(pert_embedding_init="random", n_factors=5, epochs=0, batch_size=128, log_every=0, seed=0, head="distance",
                       subspace="fixed", subspace_method="pca", axes_init="jd", noise_rank=2)
     model, _ = fit(X, p, c, config=cfg)
     expect = jd_axes(X, p, c, np.arange(len(X)), model.loadings.V.cpu().numpy())
@@ -57,7 +57,7 @@ def test_fit_starts_at_the_jd_axes():
 
 def test_jitter_without_jd_is_rejected():
     X, p, c, B, V = _context_variance_data(n_p=30)
-    cfg = TrainConfig(n_factors=5, epochs=1, log_every=0, head="distance", subspace="fixed",
+    cfg = TrainConfig(pert_embedding_init="random", n_factors=5, epochs=1, log_every=0, head="distance", subspace="fixed",
                       subspace_method="pca", axes_init="random", axes_init_jitter=0.5, noise_rank=2)
     with pytest.raises(ValueError):
         fit(X, p, c, config=cfg)

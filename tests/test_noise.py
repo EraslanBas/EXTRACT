@@ -115,7 +115,7 @@ def test_fit_runs_in_each_subspace_mode():
     V, _ = label_subspace(means, counts, nm, d=3)
     val = meta.perturbation.isin([f"P{i}" for i in range(0, 80, 9)]).to_numpy()
     for mode in ("free", "fixed", "anchored"):
-        cfg = TrainConfig(n_factors=3, epochs=2, batch_size=64, eval_every=1, patience=0,
+        cfg = TrainConfig(pert_embedding_init="random", n_factors=3, epochs=2, batch_size=64, eval_every=1, patience=0,
                           log_every=0, select_on="accuracy", subspace=mode)
         model, hist = fit(X, p, c, config=cfg, train_rows=~val, val_rows=val,
                           subspace_basis=V, noise_model=nm)
@@ -126,8 +126,8 @@ def test_fit_runs_in_each_subspace_mode():
             assert np.linalg.svd(Qb.T @ Qv, compute_uv=False).min() > 0.999
     # frozen needs a basis; fixed computes V itself from the training rows
     with pytest.raises(ValueError):
-        fit(X, p, c, config=TrainConfig(n_factors=3, subspace="frozen"), train_rows=~val)
-    cfg = TrainConfig(n_factors=3, epochs=1, batch_size=64, eval_every=0, patience=0,
+        fit(X, p, c, config=TrainConfig(pert_embedding_init="random", n_factors=3, subspace="frozen"), train_rows=~val)
+    cfg = TrainConfig(pert_embedding_init="random", n_factors=3, epochs=1, batch_size=64, eval_every=0, patience=0,
                       log_every=0, subspace="fixed", noise_rank=2)
     model, _ = fit(X, p, c, config=cfg, train_rows=~val)
     assert model.subspace_basis_.shape == (3, X.shape[1])
@@ -142,7 +142,7 @@ def test_frozen_basis_learns_nothing_in_B():
     p = pd.factorize(meta.perturbation)[0]; c = pd.factorize(meta.context)[0]
     V = np.random.default_rng(5).normal(size=(3, 30)).astype(np.float32)
     val = meta.perturbation.isin([f"P{i}" for i in range(0, 80, 9)]).to_numpy()
-    cfg = TrainConfig(n_factors=3, epochs=2, batch_size=64, eval_every=1, patience=0,
+    cfg = TrainConfig(pert_embedding_init="random", n_factors=3, epochs=2, batch_size=64, eval_every=1, patience=0,
                       log_every=0, select_on="accuracy", subspace="frozen")
     model, _ = fit(X, p, c, config=cfg, train_rows=~val, val_rows=val, subspace_basis=V)
     assert np.allclose(model.loading_matrix(), V)
@@ -195,8 +195,8 @@ def test_free_mode_can_start_where_the_fixed_mode_starts():
     from extract.train import Extract, TrainConfig
     V = np.random.default_rng(0).normal(size=(4, 30)).astype(np.float32)
     kw = dict(n_genes=30, n_perturbations=5, n_contexts=2, subspace_basis=V)
-    fixed = Extract(config=TrainConfig(n_factors=4, subspace="fixed", axes_init="random", seed=3), **kw)
-    free = Extract(config=TrainConfig(n_factors=4, subspace="free", free_init="basis",
+    fixed = Extract(config=TrainConfig(pert_embedding_init="random", n_factors=4, subspace="fixed", axes_init="random", seed=3), **kw)
+    free = Extract(config=TrainConfig(pert_embedding_init="random", n_factors=4, subspace="free", free_init="basis",
                                       axes_init="random", seed=3), **kw)
     assert torch.allclose(fixed.loadings.B, free.loadings.B, atol=1e-6)
     assert "loadings.B" in dict(free.named_parameters())

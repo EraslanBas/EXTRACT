@@ -290,7 +290,10 @@ class FixedBasisLoadings(GlobalLoadings):
 
     @torch.no_grad()
     def renormalize_rows_(self) -> None:
-        """Unit-length rows of ``B = A V``, by rescaling the rows of ``A``."""
+        """Unit-length rows of ``B = A V``, by rescaling the rows of ``A``.
+        Nothing to do in the frozen mode (B = V, no axes are learned)."""
+        if not isinstance(self.A, nn.Parameter):
+            return
         self.A.div_((self.A @ self.V).norm(dim=1, keepdim=True).clamp_min(1e-12))
 
     @property

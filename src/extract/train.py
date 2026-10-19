@@ -42,7 +42,7 @@ from .objectives.total_correlation import (
 class TrainConfig:
     #: Keep near the effective rank of the data. Participation-ratio effective
     #: rank on these matrices is 16.0, so 20-30 is the sensible range.
-    n_factors: int = 24
+    n_factors: int = 20
 
     #: Must retain a non-quadratic statistic: a purely quadratic head is
     #: rotation invariant and identifies nothing.
@@ -59,7 +59,7 @@ class TrainConfig:
     #: Too low and the contrastive term selects tiny-variance directions that
     #: discriminate well but carry no interpretable gene program; too high and
     #: the model collapses to PCA and stops responding to the label.
-    alpha: float = 1.0
+    alpha: float = 700.0
 
     #: Thin the label-permuted negatives so that
     #: ``|permuted| + |synthetic| == |positives|``, i.e. one negative per
@@ -77,7 +77,7 @@ class TrainConfig:
     #: ``> 0`` actively pushes ``B`` away from spanning them, which is
     #: contrastive PCA against a marginal-matched background. Either way ``B``
     #: is fitted only to genuinely observed perturbation responses.
-    recon_fake_weight: float = 0.0
+    recon_fake_weight: float = 1.0
 
     #: Off by default. Independence is not identifiability -- see
     #: objectives.total_correlation.
@@ -85,8 +85,8 @@ class TrainConfig:
     tc_hidden: int = 256
     tc_lr: float = 1e-4
 
-    batch_size: int = 256
-    epochs: int = 50
+    batch_size: int = 1024
+    epochs: int = 1000
     lr: float = 1e-3
     weight_decay: float = 0.0
     grad_clip: float | None = 5.0
@@ -116,7 +116,7 @@ class TrainConfig:
     #: truncated to its top ``rca_rank`` eigen-directions. ``"snr"``: between-
     #: pair signal over the within-pair noise model (the previous method; also
     #: what ``"anchored"`` uses). See extract.data.noise.
-    subspace_method: str = "rca"
+    subspace_method: str = "pca"
     rca_rank: int = 100
 
     #: Free mode only. ``"random"``: B starts at random (the earlier free
@@ -135,7 +135,7 @@ class TrainConfig:
     #: ``"random"`` (a random rotation of V's axes, drawn from ``seed``) or
     #: ``"jd"`` (the joint-diagonalisation axes of the per-context covariances
     #: of the training pair means inside V; see :func:`jd_axes`).
-    axes_init: str = "identity"
+    axes_init: str = "jd"
     #: With ``axes_init="jd"``: rotate the JD axes by ``expm(t S)``, ``S`` a
     #: random skew-symmetric matrix of unit spectral norm drawn from ``seed``,
     #: so seeds start at different points near the JD axes (0 = all seeds start
@@ -155,10 +155,10 @@ class TrainConfig:
     #: zhat_k(u))^2 / (2 sigma_k^2), with the label model predicting the
     #: activities zhat (``basis`` is then unused). See models.heads.
     head: str = "statistics"
-    #: Statistics head only: the label also predicts a per-program term
-    #: c_k(u) subtracted from the score, standing in for the normaliser
-    #: -log Z(lambda(u)) that the plain statistics head lacks.
-    head_normaliser: bool = False
+    #: Statistics head only (ignored by the other heads): the label also
+    #: predicts a per-program term c_k(u) subtracted from the score, standing
+    #: in for the normaliser -log Z(lambda(u)) that the plain statistics head lacks.
+    head_normaliser: bool = True
 
     #: Distance head only: ``"shared"`` (one learned variance per factor) or
     #: ``"label"`` (the label network also predicts each factor's variance,
@@ -172,8 +172,8 @@ class TrainConfig:
     #: objective (error + lasso_lambda * group penalty), so it prefers axes on
     #: which each pair uses few programs -- also in the fixed mode. Batches are
     #: built from whole pairs. Branch `group-lasso`, experimental.
-    coding: str = "ls"
-    lasso_lambda: float = 0.05
+    coding: str = "group_lasso"
+    lasso_lambda: float = 0.0272
     lasso_steps: int = 30
     #: z handed to the discriminator: refitted least squares on the selected
     #: programs (True) or the shrunken lasso activities (False).
@@ -182,15 +182,15 @@ class TrainConfig:
     #: Regularisation of the label network against memorising training pairs:
     #: decoupled (AdamW) weight decay on its parameters only, and dropout on
     #: its embeddings and hidden layer (MLP label model). 0 = off.
-    label_weight_decay: float = 0.0
-    label_dropout: float = 0.0
+    label_weight_decay: float = 0.01
+    label_dropout: float = 0.2
 
     #: Starting perturbation embeddings (MLP label model). ``"random"``.
     #: ``"response"``: from how each perturbation's target gene responds, as a
     #: response gene, across the training pairs -- see
     #: :func:`response_embeddings`. Perturbations whose target is not a
     #: response gene keep a random start. Trained further either way.
-    pert_embedding_init: str = "random"
+    pert_embedding_init: str = "response"
 
     #: Weight rho of the activity-sparsity penalty,
     #: rho * sum_k mean_rows |z_k| / sd(z_k), over the batch's measured
@@ -216,7 +216,7 @@ class TrainConfig:
     no_mask: bool = False
 
     #: Evaluate on the validation rows every N epochs (0 = never).
-    eval_every: int = 5
+    eval_every: int = 3
 
     #: Stop when validation accuracy has not improved for this many
     #: evaluations, and restore the best-scoring parameters. Set to 0 to run
@@ -225,7 +225,7 @@ class TrainConfig:
     #: training accuracy keeps climbing, so the last epoch is not the model you
     #: want -- and choosing the epoch on the *test* set would make its numbers
     #: no longer held out.
-    patience: int = 4
+    patience: int = 0
 
     #: Never stop before this many epochs, however early validation bottomed
     #: out. Early stopping still RESTORES the best epoch -- this only decides
@@ -240,7 +240,7 @@ class TrainConfig:
     #: while training keeps falling. "accuracy" and "total" can disagree
     #: sharply: BCE worsens as the head grows confident even while the ranking
     #: it induces still improves.
-    select_on: str = "total"
+    select_on: str = "auc"
 
     negative_weights: dict[str, float] | None = None
     log_every: int = 10
@@ -309,8 +309,6 @@ class Extract(nn.Module):
                 if config.unconstrained_head
                 else PerComponentHead(config.basis, normaliser=config.head_normaliser)
             )
-        if config.head_normaliser and (config.head != "statistics" or config.unconstrained_head):
-            raise ValueError("head_normaliser is for the statistics head")
         n_basis = (self.head.n_basis if config.head == "distance"
                    else self.head.n_outputs if isinstance(self.head, PerComponentHead)
                    else len(config.basis))
@@ -466,6 +464,8 @@ def response_embeddings(
     ok = target_col != NO_MASK
     col_of[perturbation_idx[ok]] = target_col[ok]
     has = col_of != NO_MASK
+    if not has.any():          # no target among the response genes: all keep the random start
+        return np.zeros((n_perturbations, dim), dtype=np.float32), has
     T = means[:, col_of[has]].T.copy()                       # [targets, training pairs]
     T[pair_pert[None, :] == np.nonzero(has)[0][:, None]] = 0.0   # own knockdown entries
     U, S, _ = randomized_svd(T.astype(np.float32), min(dim, *T.shape), n_iter=7, random_state=seed)
@@ -648,9 +648,8 @@ def fit(
                   f"training rows", flush=True)
 
     axes0 = None
-    if config.axes_init == "jd":
-        if subspace_basis is None:
-            raise ValueError("axes_init='jd' needs a subspace basis (fixed mode or free_init='basis')")
+    if config.axes_init == "jd" and subspace_basis is not None:
+        # (free mode with a random B has no axes to start: nothing to do)
         axes0 = jd_axes(X, perturbation_idx, context_idx, train_idx, subspace_basis,
                         is_real=is_real, jitter=config.axes_init_jitter, seed=config.seed)
     elif config.axes_init_jitter:

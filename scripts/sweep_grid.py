@@ -176,21 +176,23 @@ def _val_scores(model, fa, rows, is_real, synth_level, batch=4096, seed=12345) -
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--split-dir", type=Path, default=paths.root()/"splits"/"pair_seed0")
+    ap.add_argument("--split-dir", type=Path,
+                    default=paths.root()/"splits"/"pair_seed0_ctxshuffle_pgenes_disjoint_min100_noMT")
     ap.add_argument("--out-dir", type=Path, default=paths.root()/"sweep_grid")
-    ap.add_argument("--d", nargs="+", type=int, default=[2,4,6,8,10,12,14])
+    ap.add_argument("--d", nargs="+", type=int, default=[20])
     ap.add_argument("--alpha", nargs="+", type=float,
-                    default=[500,700,900,1000,1500,2000,3000])
-    ap.add_argument("--beta", nargs="+", type=float, default=[0.0,0.25,0.5,1.0])
-    ap.add_argument("-K","--n-subsamples", nargs="+", type=int, default=[1,2,3,5,7,10])
-    ap.add_argument("--seeds", nargs="+", type=int, default=[0,1])
-    ap.add_argument("--epochs", type=int, default=150)
+                    default=[700])
+    ap.add_argument("--beta", nargs="+", type=float, default=[1.0])
+    ap.add_argument("-K","--n-subsamples", nargs="+", type=int, default=[10])
+    ap.add_argument("--seeds", nargs="+", type=int, default=[0,1,2])
+    ap.add_argument("--epochs", type=int, default=1000)
     ap.add_argument("--batch-size", type=int, default=1024)
-    ap.add_argument("--patience", type=int, default=8)
-    ap.add_argument("--min-epochs", type=int, default=100,
+    ap.add_argument("--patience", type=int, default=0)
+    ap.add_argument("--min-epochs", type=int, default=1000,
                     help="never stop before this; the best epoch is still restored")
     ap.add_argument("--eval-every", type=int, default=3)
-    ap.add_argument("--shuffled-frac", type=float, default=0.5)
+    ap.add_argument("--shuffled-frac", type=float, default=0.0,
+                    help="share of synthetic (gene-shuffled) negatives; 0 (default) = label swaps only")
     ap.add_argument("--shuffle-levels", type=float, nargs="+", default=None,
                     help="graded synthetic rows: take each row's twin from one of "
                          "these gene-shuffle fractions (e.g. 0.2 0.4 0.6 0.8 1.0); "
@@ -199,7 +201,7 @@ def main() -> int:
     ap.add_argument("--val-frac", type=float, default=0.1)
     ap.add_argument("--val-seed", type=int, default=0)
     ap.add_argument("--draw-seed", type=int, default=0)
-    ap.add_argument("--select-on", default="accuracy",
+    ap.add_argument("--select-on", default="auc",
                     choices=["total", "accuracy", "disc", "recon", "auc"],
                     help="validation metric early stopping selects on. "
                          "accuracy (default): val BCE rises from epoch ~0-3 "
@@ -229,36 +231,36 @@ def main() -> int:
                     help="statistics the head applies to each factor, one comma-"
                          "separated set per grid value, e.g. abs  linear,abs. "
                          "Non-default sets add _head-<names> to the tag")
-    ap.add_argument("--axes-init", default="identity", choices=["identity", "random", "jd"],
+    ap.add_argument("--axes-init", default="jd", choices=["identity", "random", "jd"],
                     help="fixed mode: start A at the identity, at a random rotation "
                          "(per seed; adds _Arandom) or at the joint-diagonalisation axes "
                          "of the per-context covariances (adds _Ajd)")
     ap.add_argument("--axes-init-jitter", type=float, default=0.0,
                     help="with --axes-init jd: rotate the JD axes by expm(t S), S random per "
                          "seed; adds _jit<t>")
-    ap.add_argument("--label-weight-decay", type=float, default=0.0,
+    ap.add_argument("--label-weight-decay", type=float, default=0.01,
                     help="AdamW weight decay on the label network only; adds _lwd<x>")
-    ap.add_argument("--label-dropout", type=float, default=0.0,
+    ap.add_argument("--label-dropout", type=float, default=0.2,
                     help="dropout in the MLP label network; adds _ldo<x>")
     ap.add_argument("--embedding-dim", type=int, default=64, help="perturbation embedding size")
     ap.add_argument("--context-embedding-dim", type=int, default=8, help="context embedding size")
-    ap.add_argument("--context-embedding-init", choices=["random", "control-means"], default="random",
+    ap.add_argument("--context-embedding-init", choices=["random", "control-means"], default="control-means",
                     help="start context embeddings at random or at the PCA of each context's "
                          "control-cell mean expression (--context-means); adds _ctxctrl")
     ap.add_argument("--context-means", type=Path, default=None,
                     help="contexts x genes control means (default $EXTRACT_ROOT/context_control_means.parquet, "
                          "from scripts/context_control_means.py)")
-    ap.add_argument("--pert-embedding-init", choices=["random", "response"], default="random",
+    ap.add_argument("--pert-embedding-init", choices=["random", "response"], default="response",
                     help="start perturbation embeddings at random or from how each target "
                          "gene responds across the training pairs; response adds _embresp")
     ap.add_argument("--head-variance", choices=["shared", "label"], default="shared",
                     help="distance head: one variance per factor, or predicted per label "
                          "and factor; label adds _hvar to the tag")
-    ap.add_argument("--coding", choices=["ls", "group_lasso"], default="ls",
+    ap.add_argument("--coding", choices=["ls", "group_lasso"], default="group_lasso",
                     help="activities: masked least squares, or a group lasso with one selection "
                          "of programs per (perturbation, context) pair; group_lasso adds "
                          "_gl<lambda> to the tag")
-    ap.add_argument("--lasso-lambda", type=float, default=0.05)
+    ap.add_argument("--lasso-lambda", type=float, default=0.0272)
     ap.add_argument("--lasso-steps", type=int, default=30)
     ap.add_argument("--no-lasso-refit", action="store_true",
                     help="give the discriminator the raw lasso activities instead of the "
@@ -272,14 +274,14 @@ def main() -> int:
     ap.add_argument("--head", default="statistics", choices=["statistics", "distance"],
                    help="discriminator head: per-factor statistics (default) or the distance "
                         "between measured and predicted activity; distance adds _dist to the tag")
-    ap.add_argument("--head-normaliser", action="store_true",
+    ap.add_argument("--head-normaliser", action=argparse.BooleanOptionalAction, default=True,
                     help="statistics head: the label also predicts a per-program term c_k(p, c) "
                          "subtracted from the score (a learned normaliser); adds _norm to the tag")
     ap.add_argument("--label-model", default="mlp", choices=["mlp", "product", "ammi"],
                     help="label -> lambda map: unconstrained MLP, the structured "
                          "product f(p) * g(c), or ammi a(p) + b(c) + f(p) * g(c); "
                          "non-mlp adds _<label-model> to the tag")
-    ap.add_argument("--subspace-method", choices=["rca", "snr", "pca"], default="rca",
+    ap.add_argument("--subspace-method", choices=["rca", "snr", "pca"], default="pca",
                     help="how V is computed: reliable components analysis (default), "
                          "signal over the within-pair noise model, or PCA of the pair means; "
                          "adds _rca<rank> / _snr / _pca to the tag")
@@ -414,7 +416,7 @@ def main() -> int:
                    if args.free_init == "basis" else "") if sub == "free"
                   else {"snr": "_snr", "pca": "_pca"}.get(args.subspace_method, f"_rca{args.rca_rank}"))
                + ("_dist" if args.head == "distance" else "")
-               + ("_norm" if args.head_normaliser else "")
+               + ("_norm" if args.head_normaliser and args.head == "statistics" else "")
                + ("_hvar" if args.head_variance == "label" else "")
                + (f"_lwd{args.label_weight_decay:g}" if args.label_weight_decay else "")
                + (f"_ldo{args.label_dropout:g}" if args.label_dropout else "")
