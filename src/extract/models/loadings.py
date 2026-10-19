@@ -249,6 +249,32 @@ def gene_concentration(B: torch.Tensor, k: int = 200) -> torch.Tensor:
     return torch.topk(sq, min(k, sq.shape[1]), dim=1).values.sum(1) / sq.sum(1).clamp_min(1e-20)
 
 
+def l1_sparseness(B: torch.Tensor) -> torch.Tensor:
+    """[n_factors] ``||b_k||_1 / (||b_k||_2 sqrt(G))`` per program: 1 for a flat
+    profile, ``1/sqrt(G)`` for a single gene (the Hoyer-type sparseness
+    measure; lower = heavier-tailed loadings). Scale-free; raw loadings."""
+    return B.abs().sum(1) / (B.norm(dim=1).clamp_min(1e-20) * B.shape[1] ** 0.5)
+
+
+def collinearity_hinge(B: torch.Tensor, tau: float) -> torch.Tensor:
+    """``sum_{k<l} max(0, |cos(b_k, b_l)| - tau)^2``: zero unless two programs
+    point in nearly the same direction (shared genes are free below ``tau``)."""
+    Bu = B / B.norm(dim=1, keepdim=True).clamp_min(1e-20)
+    C = (Bu @ Bu.T).abs()
+    iu = torch.triu_indices(C.shape[0], C.shape[0], 1, device=C.device)
+    return (torch.relu(C[iu[0], iu[1]] - tau) ** 2).sum()
+
+
+def gene_prior(B: torch.Tensor, kind: str, k: int = 200) -> torch.Tensor:
+    """The gene-side penalty summed over programs: ``"topk"``: sum_k (1 - share
+    in the top k genes); ``"l1"``: sum_k l1_sparseness."""
+    if kind == "topk":
+        return (1.0 - gene_concentration(B, k)).sum()
+    if kind == "l1":
+        return l1_sparseness(B).sum()
+    raise ValueError(f"gene_prior must be 'topk' or 'l1', got {kind!r}")
+
+
 def initial_axes(d: int, axes_init: str = "identity", seed: int = 0) -> torch.Tensor:
     """Starting ``A`` [d, d] for ``B = A V``: the identity, or a random rotation
     drawn from ``seed`` (different for every seed, so that cross-seed agreement
