@@ -14,14 +14,14 @@ engages in each context, and how strongly.
 Each data point is one perturbation in one context: the change in expression of
 every gene, compared with unperturbed control cells from the same context, as a
 log-fold change. Every (perturbation, context) pair contributes several such
-rows: one from all its cells, and one from each of up to ten **disjoint groups
-of 100 cells** (pseudobulks). Because the groups share no cells, the differences
+rows: one from all its cells, and one from each of several **disjoint groups
+of cells of a fixed size** (pseudobulks). Because the groups share no cells, the differences
 between a pair's rows show how much its response would change if other cells had
 been measured: the measurement noise of that pair.
 
 A perturbation's logFC is an estimate, not an exact value, and with few cells
 random cell-to-cell variation alone can produce large apparent changes. Pairs
-with fewer than 100 cells are therefore left out. The model is never told how
+with too few cells are therefore left out. The model is never told how
 many cells a row has or which row is the full one: all rows of a pair are treated
 alike, so nothing the model uses would be missing for new data. Genes that no
 perturbation changes are removed, and so are the mitochondrial transcripts;
@@ -32,16 +32,17 @@ nothing else is rescaled.
 A measured response is assumed to be a mix of a few gene programs:
 response ≈ activities × programs, where the programs are the rows of a matrix
 $\mathbf B$ (programs × genes) and the activities say how strongly this
-perturbation, in this context, engages each program. EXTRACT uses 20 programs.
+perturbation, in this context, engages each program. The number of programs,
+$d$, is a hyperparameter chosen for each dataset.
 
-**Where the programs live.** The programs are combinations of the 20 main
+**Where the programs live.** The programs are combinations of the $d$ main
 directions of the screen's responses: the principal components $\mathbf V$ of
 the pairs' average responses. Averaging a pair's rows removes most of their
 measurement noise, so these directions follow what perturbations do. Inside this
 space the programs are $\mathbf B = \mathbf A\mathbf V$, and only the small
 matrix $\mathbf A$ is learned.
 
-**Where they start.** The 16 contexts change how strongly perturbations vary
+**Where they start.** The contexts change how strongly perturbations vary
 along each program. EXTRACT starts from the axes along which these differences
 between contexts are cleanest (joint diagonalisation of the contexts'
 covariances). These axes are found from the data alone, before training.
@@ -66,8 +67,8 @@ processes make the task easier than mixtures of them.
 Training minimises the discriminator's loss plus the group-lasso objective
 (reconstruction error plus the penalty on the number of programs). The data are
 split by (perturbation, context) pair into training, validation and test sets; a
-validation or test pair is never seen during training. Every model trains for
-1,000 epochs and is kept at the epoch where it best ranks true labels above wrong
+validation or test pair is never seen during training. All models in a
+comparison train for the same number of epochs, and each is kept at the epoch where it best ranks true labels above wrong
 ones on validation pairs (validation ROC AUC). Models are compared on validation
 only, over several random seeds, and the test pairs are used once, at the end.
 
@@ -92,7 +93,7 @@ negatives, training, evaluation, configuration and the code layout.
 
 Each row is a vector $\mathbf x \in \mathbb R^G$ of `ashr`-shrunken log-fold
 changes for one perturbation $p$ in one context $c$, measured against controls
-from the same context. The model assumes the rows are linear mixtures of $d = 20$
+from the same context. The model assumes the rows are linear mixtures of $d$
 latent programs, $\mathbf x \approx \mathbf z\mathbf B$, and wants the axes of
 $\mathbf z$ to be the programs rather than an arbitrary rotation of them.
 
@@ -124,9 +125,10 @@ The model never sees counts. The `de/` package turns cell-level single-cell
 data into one matrix per context:
 
 1. **Plan the rows.** Each (perturbation, context) pair gets a full-data row from
-   all its cells and up to ten pseudobulk rows, each from 100 cells drawn without
-   replacement, so that no cell is in two pseudobulks.
-2. **Fix the control set.** One control subset per context ($10^5$ cells) is
+   all its cells and up to $K$ pseudobulk rows, each from $m$ cells drawn without
+   replacement, so that no cell is in two pseudobulks (`--n-subsamples`,
+   `--replicate-cells`).
+2. **Fix the control set.** One control subset per context (`--n-control-cells`) is
    drawn once, saved, and shared by every row, so the control term of the
    standard error is identical across rows.
 3. **Welch statistics.** On the $\log(1+\text{CPM})$ scale, per gene,
@@ -138,8 +140,8 @@ data into one matrix per context:
    the vector of posterior means.
 5. **Assemble.** Each context's posterior means become one rows × genes matrix.
 
-Pairs with fewer than 100 cells are removed from the analysis: their responses
-are dominated by sampling noise. The cell counts are used only here, to build
+Pairs with fewer cells than one pseudobulk needs are removed from the analysis
+(`--min-pair-cells`): their responses are dominated by sampling noise. The cell counts are used only here, to build
 the matrices. In the model, all rows of a pair are **exchangeable**: it is not
 told which row is the full-data one, how many cells a row has, or which
 pseudobulk it is. Cell counts would not exist for new data, and their noise
@@ -151,20 +153,20 @@ biology.
 No centring or per-gene scaling is applied anywhere. `ashr` has already put
 every entry on a common logFC scale; dividing by per-gene standard deviation
 would promote low-variance genes. Genes that no perturbation moves are dropped:
-a gene is kept if $|x| > \ln 1.2$ (a 20% change) in more than 150
-(perturbation, context) pairs, counted on the full-data rows of the training
-pairs. Every perturbed gene is kept as well, so that each target's own response
+a gene is kept if $|x| > t$ in at least $n_{\min}$ (perturbation, context)
+pairs, counted on the full-data rows of the training pairs (`--threshold`,
+`--min-affected`). Every perturbed gene is kept as well, so that each target's own response
 is available (it starts the perturbation embeddings, below). The mitochondrial
-transcripts (`MT-*`; 9 pass the filter) are excluded: their responses are very large and strongly
+transcripts (`MT-*`) are excluded: their responses are very large and strongly
 correlated with each other, mostly reflecting cell stress and quality rather
 than a program, and without scaling they would dominate any sparsity measure on
-the gene axis. This leaves 5,504 genes.
+the gene axis.
 
 #### The on-target mask
 
 Knocking down gene X drops X's own transcript by roughly its control mean.
-These entries sit 40 to 50 standard errors from zero and carry a median 25% of
-a row's squared norm. Left in, they would claim a factor that encodes knockdown
+These entries sit many standard errors from zero and can carry a large share
+of a row's squared norm. Left in, they would claim a factor that encodes knockdown
 efficiency. Each row is mapped to its own gene's column (`NO_MASK = −1` for
 controls or unmatched names), and that column is excluded from the activities,
 the reconstruction error and the span residual alike. A compound screen simply
@@ -201,8 +203,8 @@ depends on the axes: how the variance of the programs across perturbations
 differs between contexts.
 
 If the programs are independent sources whose spread across perturbations is
-context-specific (a drug that silences a pathway shrinks that program's
-variation, another amplifies it), then in each context $c$ the covariance of
+context-specific (a context in which a pathway is silenced shrinks that
+program's variation, another amplifies it), then in each context $c$ the covariance of
 the pair means, written in $\mathbf V$'s coordinates, is
 
 $$
@@ -210,7 +212,7 @@ $$
 $$
 
 with the same mixing $\mathbf M$ for every context and a context-specific
-diagonal $\mathbf D_c$. One matrix $\mathbf M$ that makes all 16 covariances
+diagonal $\mathbf D_c$. One matrix $\mathbf M$ that makes all the contexts' covariances
 diagonal at once identifies the programs, as long as the contexts' variance
 profiles differ (second-order blind source separation).
 
@@ -226,9 +228,9 @@ profiles differ (second-order blind source separation).
    $\mathbf B_0 = \mathbf U^\top\mathbf W^{-1}\mathbf Q^\top$, rows scaled to
    unit length, and $\mathbf A_0 = \mathbf B_0\mathbf V^{+}$.
 
-This start is deterministic and uses only training data. In this screen the
-signal behind it is strong: computed separately on two halves of the
-perturbations, nine of the axes reproduce with $|\cos| > 0.9$ (at $d = 26$). Training then refines the axes
+This start is deterministic and uses only training data. How much signal is
+behind it can be checked by computing it separately on two halves of the
+perturbations and comparing the axes. Training then refines the axes
 with the two criteria below (`extract.train.jd_axes`, `axes_init="jd"`).
 
 ### Activities: the group lasso
@@ -252,21 +254,21 @@ where $\mathbf m_r$ masks the row's own target gene.
   program's strength may still differ between the rows.
 - **Different selections per context.** Each (perturbation, context) pair
   chooses its own programs, so a perturbation can engage different programs
-  under different drugs.
+  in different contexts.
 - **$\sqrt{n_g}$** makes the penalty comparable between pairs with few and many
   rows, and **unit-length rows of $\mathbf B$** stop the penalty from being
   avoided by scaling a program up and its activities down.
-- **$\lambda = 0.0272$**, the typical size of a program's activity in a pair
-  (the median over pairs and programs of $\|\mathbf Z_g[:,k]\|_2/\sqrt{n_g}$ for
-  least-squares activities on the starting axes). A pair then uses about six of
-  the 20 programs.
+- **$\lambda$** sets how many programs a pair uses, and is tuned on validation.
+  A natural scale for it is the typical size of a program's activity in a pair:
+  the median over pairs and programs of $\|\mathbf Z_g[:,k]\|_2/\sqrt{n_g}$ for
+  least-squares activities on the starting axes.
 
 **Solving it.** FISTA (proximal gradient with momentum), for all pairs of a
 batch in parallel: start at the least-squares activities, take a gradient step
 on the reconstruction error with step $1/L$ ($L$ the largest eigenvalue of
 $\mathbf B\mathbf B^\top$), shrink each column by block soft-thresholding,
 $\mathbf Z_g[:,k] \leftarrow \mathbf Z_g[:,k]\max\!\big(0,\,1-\eta\lambda\sqrt{n_g}/\|\mathbf Z_g[:,k]\|_2\big)$,
-and repeat for 30 steps. The steps are differentiable, so gradients reach
+and repeat for a fixed number of steps (`lasso_steps`). The steps are differentiable, so gradients reach
 $\mathbf B$. The lasso shrinks the activities it keeps, so for the discriminator
 the selected programs of each row are refitted by masked least squares; the
 reconstruction term uses the raw lasso activities.
@@ -363,14 +365,13 @@ scale does not depend on $G$.
 #### Label network: where all the interaction lives
 
 The label network maps $(p, c)$ to the head's coefficients. It concatenates a
-perturbation embedding $e_p$ (64 dimensions) and a context embedding $e_c$ (8
-dimensions) and passes them through
-`Dropout(0.2) → Linear(72, 128) → ReLU → Dropout(0.2) → Linear(128, d·5)`,
-with weight decay 0.01 on the label network; dropout and weight decay keep it
-from memorising the training pairs. The sizes differ because there are about
-1,900 perturbations but only 16 contexts (14 drugs and 2 DMSO controls):
-sixteen points need at most 15 dimensions, and 8 principal components already
-hold 96% of the variation between the contexts' control cells (below).
+perturbation embedding $e_p$ and a context embedding $e_c$ and passes them
+through `Dropout → Linear → ReLU → Dropout → Linear(·, d·5)`, with weight decay
+on the label network; dropout and weight decay keep it from memorising the
+training pairs. The context embedding can be much smaller than the perturbation
+embedding: a screen usually has far fewer contexts than perturbations ($C$
+contexts need at most $C-1$ dimensions), and the PCA of the contexts' control
+cells (below) shows how many dimensions carry their differences.
 
 **Starting perturbation embeddings: how the target gene responds.** A
 perturbation's embedding starts from how its *target gene* behaves as a
@@ -378,7 +379,7 @@ response gene when other genes are perturbed. Take the mean of each training
 pair's rows, keep the columns of the target genes, and transpose: one row per
 target gene, one column per training pair. The entries where the pair's own
 perturbation targets that gene are set to zero, since the knockdown itself
-would dominate. A truncated SVD of this matrix to 64 dimensions gives each
+would dominate. A truncated SVD of this matrix to the embedding size gives each
 target gene's starting embedding, rescaled to the size of a random start. Genes
 affected alike by many perturbations tend to sit in the same pathway, so their
 knockouts start close together. Only training pairs are used, so validation and
@@ -387,13 +388,13 @@ response genes start at random. (`extract.train.response_embeddings`.)
 
 **Starting context embeddings: the control cells.** A context's embedding
 starts from the mean expression of its control (non-targeting) cells: the
-100,000 control cells each context's logFC were computed against, averaged per
+control cells each context's logFC were computed against, averaged per
 gene over the response genes. PCA of the contexts × genes matrix (each gene
-centred across the 16 contexts, not relative to DMSO) gives each context's
-scores on the top 8 components, rescaled to the size of a random start. The
-logFC are measured against each context's own controls, so the drug's direct
+centred across the contexts, not relative to a reference context) gives each
+context's scores on the top components (as many as the embedding size), rescaled to the size of a random start. The
+logFC are measured against each context's own controls, so the context's direct
 effect on expression is removed from the data; what the control cells add is
-the cell state the drug creates, which shapes how perturbations act.
+the cell state the context creates, which shapes how perturbations act.
 (`extract.train.control_mean_embeddings`, computed by
 `scripts/context_control_means.py`.)
 
@@ -449,8 +450,8 @@ set of axes cannot reproduce the same scores. A basis of only `square` is
 refused, because $\sum_k z_k^2$ is rotation invariant.
 
 The theorem's conditions (noiseless mixing, enough label-driven variation of the
-programs' distributions) hold only approximately here. In this screen most of
-the label signal is in the programs' means, and the head alone constrains the
+programs' distributions) hold only approximately in real screens. When most of
+the label signal is in the programs' means, the head alone constrains the
 rotation only weakly; the starting axes and the group lasso supply the rest.
 
 #### Shapes
@@ -463,15 +464,15 @@ rotation only weakly; the starting axes and the group lasso supply the rest.
 | `B` | [d, G] | loadings | $\mathbf A\mathbf V$, unit rows; the interpretable output |
 | `z` | [batch, d] | group lasso | zero for unselected programs |
 | `q(z)` | [batch, d, 4] | head | four statistics |
-| `e_p` | [batch, 64] | label network | shared perturbation embedding |
-| `e_c` | [batch, 8] | label network | shared context embedding |
+| `e_p` | [batch, $d_p$] | label network | shared perturbation embedding |
+| `e_c` | [batch, $d_c$] | label network | shared context embedding |
 | `λ`, `c` | [batch, d, 4], [batch, d] | label network | label-dependent weights and normaliser |
 | `s` | [batch] | head | true/false logit |
 
 ### Objective
 
 $$
-\mathcal L \;=\; \mathcal L_{\text{disc}} \;+\; \alpha\,\mathcal L_{\text{lasso}}, \qquad \alpha = 700 .
+\mathcal L \;=\; \mathcal L_{\text{disc}} \;+\; \alpha\,\mathcal L_{\text{lasso}} .
 $$
 
 **Discrimination.**
@@ -495,9 +496,9 @@ so it is on a per-row, per-gene scale. $\lambda$ appears twice: in the solve
 axes on which pairs need fewer programs cheaper). Every row weighs the same.
 
 **The weight $\alpha$.** The discrimination term is of order 1, while the
-reconstruction error per gene is of order the mean squared logFC, about
-$7\times10^{-4}$. So $\alpha$ in the hundreds is needed for the two terms to
-interact.
+reconstruction error per gene is of order the mean squared logFC, typically
+far below 1. So $\alpha$ must be large for the two terms to interact; it is
+tuned on validation.
 
 ### Negatives
 
@@ -534,18 +535,17 @@ computes $\mathbf V$ from the measured training rows, the starting axes
 $\mathbf A_0$ by joint diagonalisation, and the starting embeddings. Then, per
 step:
 
-1. Draw a batch of **whole pairs** (about 1,024 rows), so each pair's rows are
+1. Draw a batch of **whole pairs** (up to a target number of rows), so each pair's rows are
    solved together; the sampler returns a wrong label for each measured row.
 2. Solve the group lasso for every pair of the batch with the current
    $\mathbf B$, with the on-target mask, and refit the selected programs.
 3. Score true labels $s(\mathbf z, p, c)$ and false labels
    $s(\mathbf z, p^*, c^*)$; the same $\mathbf z$ serves both.
 4. Compute $\mathcal L_{\text{disc}}$ and $\mathcal L_{\text{lasso}}$; step with
-   Adam (learning rate $10^{-3}$, gradient-norm clip 5; weight decay 0.01 on the
-   label network), updating $\mathbf A$, the label network and the head bias.
+   Adam (with gradient-norm clipping; weight decay on the label network), updating $\mathbf A$, the label network and the head bias.
 5. Rescale the rows of $\mathbf B = \mathbf A\mathbf V$ to unit length.
 
-Every 3 epochs the validation rows are scored, and every loss term is recorded
+At regular intervals the validation rows are scored, and every loss term is recorded
 for training and validation.
 
 ### Splits and model selection
@@ -555,21 +555,24 @@ come from the same cells, so they always move together.
 
 | Partition | Drawn | Used for |
 |---|---|---|
-| test | 10% of pairs, first, from metadata alone; every perturbation keeps a train/val pair | read once, at the end |
-| validation | about 10% of each perturbation's train/val pairs, at least one kept in train | choosing the epoch and the settings |
+| test | a fraction of pairs, drawn first, from metadata alone; every perturbation keeps a train/val pair | read once, at the end |
+| validation | a fraction of each perturbation's train/val pairs, at least one kept in train | choosing the epoch and the settings |
 | train | the rest | fitting |
 
 A held-out pair is an unseen combination of a seen perturbation and a seen
 context: the model has to supply the interaction.
 
-**Choosing the epoch.** Every model trains for 1,000 epochs, and the kept state
+**Choosing the epoch.** Every model in a comparison trains for the same fixed
+number of epochs, and the kept state
 is the epoch with the highest **validation ROC AUC**: how well the scores rank
 validation rows under their own label above the same rows under a wrong label.
 AUC depends only on the ranking, so it compares models whose scores are on
 different scales.
 
-**Choosing settings.** Models are compared on validation only, each over three
-random seeds: validation AUC, and how well the programs agree between seeds.
+**Choosing settings.** The hyperparameters ($d$, $\lambda$, $\alpha$, the
+embedding sizes and the label-network regularisation) are tuned for each dataset.
+Models are compared on validation only, each over several random seeds:
+validation AUC, and how well the programs agree between seeds.
 Differences smaller than the spread across seeds are not differences.
 
 **What is saved.** Each model's weights at the selected epoch and at the last
@@ -587,7 +590,7 @@ the read is logged.
 | programs per pair | How many programs the group lasso selects for a held-out pair. |
 | reconstruction | Fraction of held-out signal $\mathbf z\mathbf B$ recovers. |
 | span residual $r$ | $\|\mathbf m \odot (\mathbf x - \mathbf x\mathbf B^{+}\mathbf B)\| / \|\mathbf m \odot \mathbf x\|$: do held-out rows need programs outside $\operatorname{span}(\mathbf B)$? |
-| seed agreement | Matched $|\cos|$ between the programs of models trained with different seeds (Hungarian matching); two random sets of axes in $\mathbf V$ give about 0.48. |
+| seed agreement | Matched $|\cos|$ between the programs of models trained with different seeds (Hungarian matching), against the agreement of two random sets of axes in $\mathbf V$. |
 
 ### Reading the factors
 
@@ -614,28 +617,37 @@ zero when the context has locked the program or when nothing engages it.
 
 ### Configuration
 
-Defaults of `TrainConfig` (and of `scripts/sweep_grid.py`, which runs this
-configuration with no flags):
+The model is configured through `TrainConfig` (and the matching flags of
+`scripts/sweep_grid.py`). The structural choices described above are the
+defaults; the hyperparameters are dataset-specific and should be tuned on
+validation.
 
-| Field | Default | Role |
-|---|---|---|
-| `n_factors` | 20 | $d$ |
-| `subspace` / `subspace_method` | fixed / pca | $\mathbf B = \mathbf A\mathbf V$ with $\mathbf V$ the PCA of the pair means; `free` learns $\mathbf B$ directly |
-| `axes_init` | jd | start $\mathbf A$ at the joint-diagonalisation axes; `random` and `identity` also available |
-| `coding` / `lasso_lambda` / `lasso_steps` | group_lasso / 0.0272 / 30 | activities by the per-pair group lasso; `ls` for plain least squares |
-| `lasso_refit` | True | the discriminator sees least-squares activities on the selected programs |
-| `head` / `head_normaliser` | statistics / True | four-statistics head with the label-only term $c_k(u)$ |
-| `basis` | lin, sq, abs, tanh | must keep a non-quadratic statistic |
-| `alpha` | 700 | weight of $\mathcal L_{\text{lasso}}$ |
-| `embedding_dim` / `context_embedding_dim` / `label_hidden` | 64 / 8 / 128 | label network sizes |
-| `label_dropout` / `label_weight_decay` | 0.2 / 0.01 | label-network regularisation |
-| `pert_embedding_init` | response | start from the target gene's responses; contexts from the control means (`--context-embedding-init control-means`) |
-| `batch_size` / `epochs` / `lr` | 1,024 / 1,000 / 1e-3 | Adam, gradient clip 5.0 |
-| `eval_every` / `patience` | 3 / 0 | validation every 3 epochs; no early stopping |
-| `select_on` | auc | validation ROC AUC picks the epoch |
-| shuffled negatives | 0 | `--shuffled-frac`; label swaps only |
-| `ridge` | 1e-4 | conditioning of the least-squares refit |
-| `unconstrained_head` / `no_mask` | False / False | ablations: an MLP head (removes identifiability); no on-target mask |
+**Structure**
+
+| Field | Role |
+|---|---|
+| `subspace` / `subspace_method` | `fixed` / `pca`: $\mathbf B = \mathbf A\mathbf V$ with $\mathbf V$ the PCA of the pair means; `free` learns $\mathbf B$ directly |
+| `axes_init` | `jd`: start $\mathbf A$ at the joint-diagonalisation axes; `random` and `identity` also available |
+| `coding` | `group_lasso`: activities by the per-pair group lasso; `ls` for plain least squares |
+| `lasso_refit` | the discriminator sees least-squares activities on the selected programs |
+| `head` / `head_normaliser` | `statistics` with the label-only term $c_k(u)$ |
+| `basis` | the head's statistics (lin, sq, abs, tanh); must keep a non-quadratic one |
+| `pert_embedding_init` | `response`: start from the target gene's responses; contexts from the control means (`--context-embedding-init control-means`) |
+| `select_on` | `auc`: validation ROC AUC picks the epoch |
+| shuffled negatives | `--shuffled-frac 0`: label swaps only |
+| `unconstrained_head` / `no_mask` | ablations: an MLP head (removes identifiability); no on-target mask |
+
+**Hyperparameters to tune**
+
+| Field | Role |
+|---|---|
+| `n_factors` | $d$, the number of programs |
+| `lasso_lambda` | $\lambda$, how many programs a pair uses |
+| `alpha` | $\alpha$, weight of $\mathcal L_{\text{lasso}}$ against $\mathcal L_{\text{disc}}$ |
+| `embedding_dim` / `context_embedding_dim` / `label_hidden` | label-network sizes |
+| `label_dropout` / `label_weight_decay` | label-network regularisation |
+| `epochs` / `batch_size` / `lr` / `eval_every` | training length, batch size, learning rate, validation interval |
+| `lasso_steps` / `ridge` | group-lasso iterations; conditioning of the refit |
 
 ### Module map
 
