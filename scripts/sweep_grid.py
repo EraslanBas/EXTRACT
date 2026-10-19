@@ -273,6 +273,12 @@ def main() -> int:
                     help="weight gamma of the gene-side prior: sum_k (1 - share of program k's "
                          "weight in its --gene-topk genes); adds _gs<gamma> (and _k<k> if not 200)")
     ap.add_argument("--gene-topk", type=int, default=200)
+    ap.add_argument("--gene-prior", choices=["topk", "l1"], default="topk",
+                    help="gene-side measure: share in the top-k genes, or L1/L2 sparseness "
+                         "(heavy-tailed loadings; adds _l1)")
+    ap.add_argument("--distinct-weight", type=float, default=0.0,
+                    help="mu: penalise programs with |cos| above --distinct-tau (adds _dt<tau>)")
+    ap.add_argument("--distinct-tau", type=float, default=0.7)
     ap.add_argument("--sparsity", type=float, default=0.0,
                    help="weight of the activity-sparsity penalty (0 = off); adds _sparse<w> to the tag")
     ap.add_argument("--head", default="statistics", choices=["statistics", "distance"],
@@ -435,8 +441,11 @@ def main() -> int:
                + (f"_emb{args.embedding_dim}x{args.context_embedding_dim}"
                   if (args.embedding_dim, args.context_embedding_dim) != (32, 32) else "")
                + (f"_sparse{args.sparsity:g}" if args.sparsity else "")
-               + ((f"_gs{args.gene_sparsity:g}" + (f"_k{args.gene_topk}" if args.gene_topk != 200 else ""))
+               + ((f"_gs{args.gene_sparsity:g}" + ("_l1" if args.gene_prior == "l1" else
+                                                    f"_k{args.gene_topk}" if args.gene_topk != 200 else ""))
                   if args.gene_sparsity else "")
+               + ((f"_dt{args.distinct_tau:g}" + (f"_dw{args.distinct_weight:g}" if args.distinct_weight != 100 else ""))
+                  if args.distinct_weight else "")
                # only permuted-label negatives (no shuffled rows): one per measured row
                + ("_noshuf" if args.shuffled_frac == 0 else
                   f"_sf{args.shuffled_frac:g}" if args.shuffled_frac != 0.5 else "")
@@ -483,6 +492,8 @@ def main() -> int:
                           label_dropout=args.label_dropout,
                           axes_init_jitter=args.axes_init_jitter, head_normaliser=args.head_normaliser,
                           gene_sparsity=args.gene_sparsity, gene_topk=args.gene_topk,
+                          gene_prior=args.gene_prior, distinct_weight=args.distinct_weight,
+                          distinct_tau=args.distinct_tau,
                           coding=args.coding, lasso_lambda=args.lasso_lambda,
                           lasso_steps=args.lasso_steps, lasso_refit=not args.no_lasso_refit)
         snaps: dict[int, np.ndarray] = {}
@@ -546,6 +557,8 @@ def main() -> int:
                "axes_init": args.axes_init, "axes_init_jitter": args.axes_init_jitter,
                "head_normaliser": args.head_normaliser, "shuffled_frac": args.shuffled_frac,
                "gene_sparsity": args.gene_sparsity, "gene_topk": args.gene_topk,
+               "gene_prior": args.gene_prior, "distinct_weight": args.distinct_weight,
+               "distinct_tau": args.distinct_tau,
                "coding": args.coding, "lasso_lambda": args.lasso_lambda,
                "lasso_steps": args.lasso_steps, "lasso_refit": not args.no_lasso_refit,
                "epochs_run": len(hist), "seconds": round(time.time()-t, 1)}

@@ -206,6 +206,14 @@ class TrainConfig:
     #: the fixed mode. 0 = off.
     gene_sparsity: float = 0.0
     gene_topk: int = 200
+    #: Which gene-side measure gamma multiplies: ``"topk"`` (above) or ``"l1"``
+    #: (sum_k ||b_k||_1 / (||b_k||_2 sqrt(G)), heavy-tailed loadings).
+    gene_prior: str = "topk"
+    #: Keep programs distinct: mu * sum_{k<l} max(0, |cos(b_k, b_l)| - tau)^2.
+    #: Zero unless two programs are nearly collinear; shared genes are free.
+    #: Stops a gene prior from collapsing several programs onto the same genes.
+    distinct_weight: float = 0.0
+    distinct_tau: float = 0.7
 
     #: Ablation only: replaces the per-component head with an MLP, which
     #: destroys identifiability. See models.heads.UnconstrainedHead.
@@ -788,7 +796,7 @@ def fit(
                   "recon_synth": 0.0, "tc": 0.0, "sparsity": 0.0, "accuracy": 0.0}
         if config.coding == "group_lasso":
             totals.update(lasso_penalty=0.0, programs_per_pair=0.0)
-        totals.update(gene_penalty=0.0, gene_top_share=0.0)
+        totals.update(gene_penalty=0.0, gene_top_share=0.0, distinct_penalty=0.0)
         n_batches = 0
         if config.coding == "group_lasso":
             # batches of whole groups, so each pair's rows are solved together
@@ -919,14 +927,20 @@ def fit(
                     loss_s = (zf.abs() / (zf.std(0) + 1e-8)).mean(0).sum()
                     loss = loss + config.sparsity * loss_s
 
-            # gene-side prior on the programs: few genes per program
-            from .models.loadings import gene_concentration
-            share = gene_concentration(model.loadings.B, config.gene_topk)
-            loss_g = (1.0 - share).sum()
+            # gene-side prior on the programs: few genes per program, and
+            # programs kept distinct (no near-collinear pairs)
+            from .models.loadings import collinearity_hinge, gene_concentration, gene_prior
+            Bcur = model.loadings.B
+            share = gene_concentration(Bcur, config.gene_topk)
+            loss_g = gene_prior(Bcur, config.gene_prior, config.gene_topk)
             if config.gene_sparsity:
                 loss = loss + config.gene_sparsity * loss_g
+            loss_c = collinearity_hinge(Bcur, config.distinct_tau)
+            if config.distinct_weight:
+                loss = loss + config.distinct_weight * loss_c
             totals["gene_penalty"] += float(loss_g)
             totals["gene_top_share"] += float(share.mean())
+            totals["distinct_penalty"] += float(loss_c)
 
             loss_tc = torch.zeros((), device=device)
             if tc_disc is not None:
@@ -969,7 +983,8 @@ def fit(
         # (recon already holds the lasso penalty under the group lasso)
         record["total"] = (record["disc"] + config.alpha * record["recon"]
                            + config.sparsity * record["sparsity"]
-                           + config.gene_sparsity * record["gene_penalty"])
+                           + config.gene_sparsity * record["gene_penalty"]
+                           + config.distinct_weight * record["distinct_penalty"])
         is_last = epoch == config.epochs - 1
         evaluated = False
         if val_idx is not None and config.eval_every and (
@@ -997,14 +1012,19 @@ def fit(
                 }
             )
             # the training objective on the validation rows, term by term
-            from .models.loadings import gene_concentration
+            from .models.loadings import collinearity_hinge, gene_concentration, gene_prior
             with torch.no_grad():
-                record["val_gene_penalty"] = float(
-                    (1.0 - gene_concentration(model.loadings.B, config.gene_topk)).sum())
+                Bv = model.loadings.B
+                record["val_gene_penalty"] = float(gene_prior(Bv, config.gene_prior, config.gene_topk))
+                record["val_distinct_penalty"] = float(collinearity_hinge(Bv, config.distinct_tau))
+                record["val_gene_top_share"] = float(gene_concentration(Bv, config.gene_topk).mean())
+                Bu = Bv / Bv.norm(dim=1, keepdim=True)
+                record["val_max_program_cos"] = float(((Bu @ Bu.T).abs() - torch.eye(len(Bu), device=Bu.device)).max())
             record["val_total"] = (record["val_disc_objective"]
                                    + config.alpha * record.get("val_recon_objective", record["val_recon"])
                                    + config.sparsity * record["val_sparsity"]
-                                   + config.gene_sparsity * record["val_gene_penalty"])
+                                   + config.gene_sparsity * record["val_gene_penalty"]
+                                   + config.distinct_weight * record["val_distinct_penalty"])
             score = record[f"val_{config.select_on}"]
             improved = (
                 best["score"] is None

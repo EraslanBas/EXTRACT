@@ -60,3 +60,27 @@ def test_val_total_is_the_training_objective_term_by_term():
     expect = h["val_disc_objective"] + cfg.alpha * h["val_recon_objective"] + 0.5 * h["val_gene_penalty"]
     assert np.isclose(h["val_total"], expect)
     assert np.isclose(h["total"], h["disc"] + cfg.alpha * h["recon"] + 0.5 * h["gene_penalty"])
+
+
+def test_l1_sparseness_and_collinearity_hinge():
+    from extract.models.loadings import collinearity_hinge, l1_sparseness
+    B = torch.tensor([[1.0, 0, 0, 0], [1.0, 1, 1, 1], [1.0, 0.1, 0, 0]])
+    assert torch.allclose(l1_sparseness(B), torch.tensor([0.5, 1.0, 1.1 / (np.sqrt(1.01) * 2)], dtype=B.dtype))
+    # rows 0 and 2 are nearly collinear (cos 0.995); rows 0 and 1 have cos 0.5
+    assert float(collinearity_hinge(B, 0.99)) > 0 and float(collinearity_hinge(B, 0.999)) == 0.0
+    assert np.isclose(float(collinearity_hinge(5 * B, 0.99)), float(collinearity_hinge(B, 0.99)), rtol=1e-4)
+
+
+def test_hinge_stops_programs_collapsing_under_the_prior():
+    X, p, c = _data()
+    maxcos = {}
+    for mu in (0.0, 100.0):
+        cfg = TrainConfig(n_factors=3, epochs=40, batch_size=64, log_every=0, seed=0, head="statistics",
+                          subspace="fixed", subspace_method="pca", axes_init="random", noise_rank=2,
+                          gene_sparsity=5.0, gene_prior="l1", distinct_weight=mu, distinct_tau=0.5, lr=1e-2,
+                          pert_embedding_init="random")
+        model, hist = fit(X, p, c, config=cfg)
+        Bu = model.loadings.B.detach(); Bu = Bu / Bu.norm(dim=1, keepdim=True)
+        maxcos[mu] = float(((Bu @ Bu.T).abs() - torch.eye(3)).max())
+        assert "distinct_penalty" in hist[-1]
+    assert maxcos[100.0] <= 0.55
