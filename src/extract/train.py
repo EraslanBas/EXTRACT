@@ -204,16 +204,16 @@ class TrainConfig:
     #: sum_k (1 - share of B_k's squared loading in its ``gene_topk`` largest
     #: genes), a prior on the programs alone (no data rows), acting on A in
     #: the fixed mode. 0 = off.
-    gene_sparsity: float = 0.0
+    gene_sparsity: float = 0.05
     gene_topk: int = 200
     #: Which gene-side measure gamma multiplies: ``"topk"`` (above) or ``"l1"``
     #: (sum_k ||b_k||_1 / (||b_k||_2 sqrt(G)), heavy-tailed loadings).
-    gene_prior: str = "topk"
+    gene_prior: str = "l1"
     #: Keep programs distinct: mu * sum_{k<l} max(0, |cos(b_k, b_l)| - tau)^2.
     #: Zero unless two programs are nearly collinear; shared genes are free.
     #: Stops a gene prior from collapsing several programs onto the same genes.
-    distinct_weight: float = 0.0
-    distinct_tau: float = 0.7
+    distinct_weight: float = 100.0
+    distinct_tau: float = 0.5
 
     #: Ablation only: replaces the per-component head with an MLP, which
     #: destroys identifiability. See models.heads.UnconstrainedHead.

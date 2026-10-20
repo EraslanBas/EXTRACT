@@ -781,11 +781,14 @@ def test_total_is_the_objective_on_both_train_and_val():
     _, history = fit(X, p, c, config=cfg,
                      train_rows=split.train, val_rows=split.val)
     for h in history:
-        # (recon holds the lasso penalty under the default group lasso)
-        assert abs(h["total"] - (h["disc"] + alpha * h["recon"])) < 1e-6
+        # (recon holds the lasso penalty under the default group lasso; the
+        # gene prior and the distinctness hinge are on by default)
+        gene = cfg.gene_sparsity * h["gene_penalty"] + cfg.distinct_weight * h["distinct_penalty"]
+        assert abs(h["total"] - (h["disc"] + alpha * h["recon"] + gene)) < 1e-6
         if "val_total" in h:
+            vgene = cfg.gene_sparsity * h["val_gene_penalty"] + cfg.distinct_weight * h["val_distinct_penalty"]
             assert abs(h["val_total"]
-                       - (h["val_disc_objective"] + alpha * h["val_recon_objective"])) < 1e-6
+                       - (h["val_disc_objective"] + alpha * h["val_recon_objective"] + vgene)) < 1e-6
 
 
 

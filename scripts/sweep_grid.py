@@ -269,16 +269,16 @@ def main() -> int:
     ap.add_argument("--no-lasso-refit", action="store_true",
                     help="give the discriminator the raw lasso activities instead of the "
                          "least-squares refit on the selected programs; adds _norefit")
-    ap.add_argument("--gene-sparsity", type=float, default=0.0,
+    ap.add_argument("--gene-sparsity", type=float, default=0.05,
                     help="weight gamma of the gene-side prior: sum_k (1 - share of program k's "
                          "weight in its --gene-topk genes); adds _gs<gamma> (and _k<k> if not 200)")
     ap.add_argument("--gene-topk", type=int, default=200)
-    ap.add_argument("--gene-prior", choices=["topk", "l1"], default="topk",
+    ap.add_argument("--gene-prior", choices=["topk", "l1"], default="l1",
                     help="gene-side measure: share in the top-k genes, or L1/L2 sparseness "
                          "(heavy-tailed loadings; adds _l1)")
-    ap.add_argument("--distinct-weight", type=float, default=0.0,
+    ap.add_argument("--distinct-weight", type=float, default=100.0,
                     help="mu: penalise programs with |cos| above --distinct-tau (adds _dt<tau>)")
-    ap.add_argument("--distinct-tau", type=float, default=0.7)
+    ap.add_argument("--distinct-tau", type=float, default=0.5)
     ap.add_argument("--sparsity", type=float, default=0.0,
                    help="weight of the activity-sparsity penalty (0 = off); adds _sparse<w> to the tag")
     ap.add_argument("--head", default="statistics", choices=["statistics", "distance"],
