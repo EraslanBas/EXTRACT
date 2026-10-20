@@ -62,10 +62,17 @@ the label implies, adds this evidence over all programs, and decides. Because
 each program is judged on its own, programs that correspond to separate
 processes make the task easier than mixtures of them.
 
+**Few genes per program, and distinct programs.** A gene program is expected
+to involve a limited set of genes. EXTRACT therefore rewards programs whose
+weight is concentrated on few genes (up- or down-regulated), and, so that
+several programs cannot crowd onto the same genes, it forbids any two programs
+from pointing in nearly the same direction. Programs may still share genes.
+
 ## Training and choosing a model
 
 Training minimises the discriminator's loss plus the group-lasso objective
-(reconstruction error plus the penalty on the number of programs). The data are
+(reconstruction error plus the penalty on the number of programs) and the two
+gene-axis terms. The data are
 split by (perturbation, context) pair into training, validation and test sets; a
 validation or test pair is never seen during training. All models in a
 comparison train for the same number of epochs, and each is kept at the epoch where it best ranks true labels above wrong
@@ -107,13 +114,15 @@ three sources of it:
 2. **The starting axes** come from how the contexts differ: the joint
    diagonalisation of the per-context covariances of the pair means inside
    $\mathbf V$.
-3. **The axes are then refined** by two criteria that both depend on them: a
-   group lasso that asks each pair to use few programs, and a discriminator
-   that may only score each program separately.
+3. **The axes are then refined** by criteria that all depend on them: a group
+   lasso that asks each pair to use few programs, a discriminator that may only
+   score each program separately, and a prior on the programs themselves (few
+   genes each, no two nearly collinear).
 
 $$
 \mathbf B = \mathbf A\,\mathbf V, \qquad
 \mathcal L = \mathcal L_{\text{disc}} + \alpha\,\mathcal L_{\text{lasso}}
++ \gamma\,\mathcal L_{\text{genes}} + \mu\,\mathcal L_{\text{distinct}}
 $$
 
 with only $\mathbf A$ ($d \times d$), the label network and the discriminator's
@@ -490,7 +499,8 @@ rotation only weakly; the starting axes and the group lasso supply the rest.
 ### Objective
 
 $$
-\mathcal L \;=\; \mathcal L_{\text{disc}} \;+\; \alpha\,\mathcal L_{\text{lasso}} .
+\mathcal L \;=\; \mathcal L_{\text{disc}} \;+\; \alpha\,\mathcal L_{\text{lasso}}
+\;+\; \gamma\,\mathcal L_{\text{genes}} \;+\; \mu\,\mathcal L_{\text{distinct}} .
 $$
 
 **Discrimination.**
@@ -517,6 +527,41 @@ axes on which pairs need fewer programs cheaper). Every row weighs the same.
 reconstruction error per gene is of order the mean squared logFC, typically
 far below 1. So $\alpha$ must be large for the two terms to interact; it is
 tuned on validation.
+
+**Few genes per program.** For each program $\mathbf b_k$ (a row of $\mathbf B$),
+
+$$
+\mathcal L_{\text{genes}} = \sum_{k=1}^{d} \frac{\|\mathbf b_k\|_1}{\|\mathbf b_k\|_2\,\sqrt G} .
+$$
+
+The ratio is scale-free: it is 1 for a program that weights all genes equally
+and $1/\sqrt G$ for a program on a single gene. Minimising it moves weight off
+the many small loadings onto a few large ones, so each program's loadings
+become heavy-tailed: mostly near zero, a few large. Absolute values are used,
+so a program may combine up- and down-regulated genes. No number of genes is
+imposed; how concentrated the programs become is set by $\gamma$, against the
+other terms.
+
+**Distinct programs.** A sparsity reward alone is cheapest to satisfy by
+letting several programs share the same few large-response genes, which makes
+them near-copies. A hinge forbids that:
+
+$$
+\mathcal L_{\text{distinct}} = \sum_{k<l} \max\big(0,\; |\cos(\mathbf b_k, \mathbf b_l)| - \tau\big)^2 ,
+$$
+
+with the cosine taken over the full loading vectors. It is zero as long as two
+programs are less similar than $\tau$, i.e. the angle between them (between the
+lines, since a program and its negative are the same program) is at least
+$\arccos\tau$; above that it grows quickly, and a large $\mu$ makes it act as a
+limit. Below the limit, programs may share genes and overlap freely: real
+programs are not orthogonal, and independent programs (in the sense of the
+head) can point in similar directions in gene space.
+
+Both terms depend only on $\mathbf B$, not on the data rows; they are computed
+once per step and act on $\mathbf A$. Distinctness is best checked in two
+ways: the cosine between the programs' loading vectors, and the overlap
+(Jaccard index) of their selected gene sets.
 
 ### Negatives
 
@@ -559,7 +604,8 @@ step:
    $\mathbf B$, with the on-target mask, and refit the selected programs.
 3. Score true labels $s(\mathbf z, p, c)$ and false labels
    $s(\mathbf z, p^*, c^*)$; the same $\mathbf z$ serves both.
-4. Compute $\mathcal L_{\text{disc}}$ and $\mathcal L_{\text{lasso}}$; step with
+4. Compute $\mathcal L_{\text{disc}}$, $\mathcal L_{\text{lasso}}$ and the two gene-axis
+   terms from the current $\mathbf B$; step with
    Adam (with gradient-norm clipping; weight decay on the label network), updating $\mathbf A$, the label network and the head bias.
 5. Rescale the rows of $\mathbf B = \mathbf A\mathbf V$ to unit length.
 
@@ -649,6 +695,7 @@ validation.
 | `coding` | `group_lasso`: activities by the per-pair group lasso; `ls` for plain least squares |
 | `lasso_refit` | the discriminator sees least-squares activities on the selected programs |
 | `head` / `head_normaliser` | `statistics` with the label-only term $c_k(u)$ |
+| `gene_prior` | `l1`: the L1/L2 sparseness of each program's loadings |
 | `basis` | the head's statistics (lin, sq, abs, tanh); must keep a non-quadratic one |
 | `pert_embedding_init` | `response`: start from the target gene's responses; contexts from the control means (`--context-embedding-init control-means`) |
 | `select_on` | `auc`: validation ROC AUC picks the epoch |
@@ -666,6 +713,8 @@ validation.
 | `label_dropout` / `label_weight_decay` | label-network regularisation |
 | `epochs` / `batch_size` / `lr` / `eval_every` | training length, batch size, learning rate, validation interval |
 | `lasso_steps` / `ridge` | group-lasso iterations; conditioning of the refit |
+| `gene_sparsity` | $\gamma$, how concentrated the programs' loadings become |
+| `distinct_tau` / `distinct_weight` | $\tau$, the largest allowed $|\cos|$ between two programs (minimum angle $\arccos\tau$); $\mu$, how strictly it is enforced |
 
 ### Module map
 

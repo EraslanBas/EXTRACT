@@ -203,6 +203,9 @@ def main() -> int:
                     help="train and validate on one random half of the perturbations only "
                          "(all their pairs); adds _half<h>s<seed> to the tag")
     ap.add_argument("--half-seed", type=int, default=0, help="seed of the perturbation halving")
+    ap.add_argument("--shared-subspace", action="store_true",
+                    help="with --perturbation-half: compute V (PCA) from the training pairs of BOTH "
+                         "halves, so models of the two halves share one subspace; adds _sharedV")
     ap.add_argument("--val-seed", type=int, default=0)
     ap.add_argument("--draw-seed", type=int, default=0)
     ap.add_argument("--select-on", default="auc",
@@ -346,6 +349,26 @@ def main() -> int:
     Xtv, mtv, genes = load_partition(args.split_dir, "trainval", None,
                                      shuffled=True, shuffle_seed=0,
                                      shuffle_levels=levels)
+    shared_bases = None
+    if args.perturbation_half is not None and args.shared_subspace:
+        # V from the training pairs of both halves; each half's validation pairs are
+        # drawn exactly as that half's own run draws them, so none of them enter V
+        from extract.data.splits import perturbation_half
+        from extract.data.noise import pca_subspace
+        if args.subspace_method != "pca":
+            raise SystemExit("--shared-subspace supports --subspace-method pca only")
+        pair_all = (mtv.perturbation.astype(str) + "|" + mtv.context.astype(str)).to_numpy()
+        shared_train = np.zeros(len(mtv), bool)
+        for h_ in (0, 1):
+            mh = perturbation_half(mtv.perturbation.to_numpy(), h_, args.half_seed)
+            idx = np.nonzero(mh)[0]; m_h = mtv[mh].reset_index(drop=True); r_h = m_h.is_real.to_numpy()
+            vp = set(_pair_key(m_h[r_h])[split_val_per_perturbation(m_h[r_h], args.val_frac, args.val_seed)])
+            shared_train[idx[r_h & ~_pair_key(m_h).isin(vp).to_numpy()]] = True
+        shared_bases = {d_: pca_subspace(Xtv, pair_all, shared_train, d_, seed=args.draw_seed)[0]
+                        for d_ in sorted(set(args.d))}
+        for d_, Vb in shared_bases.items():
+            np.save(args.out_dir / f"subspace_V_pca_d{d_}_shared_halves_s{args.half_seed}.npy", Vb)
+        print(f"shared subspace from {int(shared_train.sum()):,} training rows of both halves", flush=True)
     if args.perturbation_half is not None:
         from extract.data.splits import perturbation_half
         keep_h = perturbation_half(mtv.perturbation.to_numpy(), args.perturbation_half, args.half_seed)
@@ -399,6 +422,9 @@ def main() -> int:
                 np.save(args.out_dir / f"subspace_V_snr_d{d_}.npy", bases[d_])
         print(f"label subspaces ({args.subspace_method}) for d={sorted(bases)} from the "
               f"train pairs  ({time.time()-t1:.0f}s)", flush=True)
+        if shared_bases is not None:
+            bases = shared_bases
+            print("using the subspace shared by both halves", flush=True)
 
     # NAME=PATH loads external axes; a bare "V" means the label-driven subspace
     ext_bases = {}
@@ -452,6 +478,7 @@ def main() -> int:
                + (f"_gl{args.lasso_lambda:g}" + ("_norefit" if args.no_lasso_refit else "")
                   if args.coding == "group_lasso" else "")
                + (f"_half{args.perturbation_half}s{args.half_seed}"
+                  + ("_sharedV" if args.shared_subspace else "")
                   if args.perturbation_half is not None else ""))
         # re-read each time: cheap, and means a cell finished by any earlier
         # or concurrent process is never repeated
