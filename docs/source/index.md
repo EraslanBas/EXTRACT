@@ -429,6 +429,24 @@ its centre and width, $|z|$ lets it be sparse (mostly zero, sometimes large),
 $\tanh z$ lets it be one-sided. A row scores high when each of its activities
 falls where its label's distribution puts mass.
 
+**Independent given the label, free across labels.** Because the score is a sum
+over programs, with no term combining two programs, it is the log-likelihood of
+a model in which the programs vary **independently given the label**: for one
+(perturbation, context), how far a row's activity on program $k$ falls from that
+label's typical value says nothing about program $l$. This is an assumption the
+head encodes, not a constraint imposed on the activities; axes on which it holds
+make the discrimination easier, which is how the head prefers them. Across
+labels the programs are not required to be independent: the label network can
+make a perturbation move several programs together, so over the whole screen
+two programs' activities may be strongly correlated. This differs from ICA, which
+makes the activities independent over all samples (marginal independence). Since
+the assumption concerns the activities, nothing requires the programs' gene
+loadings to be orthogonal: independent programs may share genes and point in
+similar directions in gene space, which is why $\mathbf A$ is a general
+invertible matrix rather than a rotation. The group lasso adds a related
+property: each pair uses few programs, so each program's activity is exactly
+zero for most pairs and large for a few.
+
 **Why the label-only term $c_k(u)$.** It plays the role of the distribution's
 normaliser, $\log Z_k(u)$: the amount each label must subtract so that its
 distribution has total mass one. Without it, a label whose coefficients describe
