@@ -1,21 +1,18 @@
 #!/usr/bin/env python3
-"""Full-factorial sweep over (d, alpha, beta, K, seed) on a saved split.
+"""Train EXTRACT over a grid of (d, alpha, K, seed) on a saved split.
 
-Loads ``<split>/trainval`` (and ``test``) ONCE and reuses them for every cell;
-calling fit_model.py per cell would re-read ~11 GB each time. Resumable: a cell
-whose row is already in ``sweep_metrics.csv`` is skipped, so the job can be
-killed and restarted.
+With no model flags this trains the default configuration (see
+``extract.train.TrainConfig`` and docs/notes/CURRENT_MODEL.md). Loads
+``<split>/trainval`` ONCE and reuses it for every cell. Resumable: a cell whose
+row is already in ``sweep_metrics.csv`` (or, with ``--queue``, in ``cells/``) is
+skipped.
 
-Per cell it records BOTH loss terms on all three partitions, because they
-diagnose different failures:
-  recon flat across epochs        alpha too small to anchor the subspace
-  disc falling, val disc rising   the head is overfitting
-  recon low, disc at chance       reconstructs but never oriented
+Per cell it saves everything needed to re-score the model later: the selected
+and last epoch's parameters, the configuration, the label encoding, the full
+per-epoch history, ``B`` at every evaluation, and the validation logits.
 
-TEST DISCIPLINE. Test metrics are recorded for every cell, but selection must
-use validation only -- see the selection rule in docs/HANDOFF.md. Choosing a
-cell on its test column turns test into a second validation set and its numbers
-stop being held out.
+TEST DISCIPLINE. The test partition is never read here; it is read once, at
+the end, by ``scripts/read_test.py``.
 """
 from __future__ import annotations
 import argparse, itertools, json, sys, time
@@ -25,14 +22,12 @@ import numpy as np, pandas as pd, torch
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 from extract import paths
 from extract.data.splits import (_pair_key, load_partition,
-                                       split_val_per_perturbation,
-                                       subsample_mask, thin_synthetic)
+                                       split_val_per_perturbation, subsample_mask)
 from extract.objectives import StratifiedNegativeSampler
 from extract.train import TrainConfig, evaluate, fit, prepare
 
-METRICS = ("disc", "recon", "recon_measured", "recon_synth", "accuracy",
-           "synth_accuracy", "disc_synth", "span_residual_median",
-           "real_score_mean", "fake_score_mean")
+METRICS = ("auc", "disc", "recon", "accuracy", "lasso_objective", "programs_per_pair",
+           "span_residual_median", "real_score_mean", "fake_score_mean")
 
 
 class _Queue:
@@ -133,24 +128,24 @@ class _Queue:
                     p.unlink(missing_ok=True)
 
 
-def _val_scores(model, fa, rows, is_real, synth_level, batch=4096, seed=12345) -> dict:
-    """Discriminator logits on the validation rows: measured rows under their
-    own label (``pos``) and under a permuted label (``perm``, drawn as in
-    training), and synthetic rows under their own label (``syn``, with their
-    shuffled fraction ``syn_level``)."""
-    device = next(model.parameters()).device
-    real = rows[is_real[rows]]; syn = rows[~is_real[rows]]
-    sampler = StratifiedNegativeSampler(
-        perturbation_idx=fa["perturbation_idx"][real], context_idx=fa["context_idx"][real],
-        stratum=np.zeros(len(real), dtype=np.int64),
+def _sampler(fa, rows):
+    return StratifiedNegativeSampler(
+        perturbation_idx=fa["perturbation_idx"][rows], context_idx=fa["context_idx"][rows],
+        stratum=np.zeros(len(rows), dtype=np.int64),
         n_perturbations=int(fa["perturbation_idx"].max()) + 1,
         n_contexts=int(fa["context_idx"].max()) + 1,
         weights={"same_s_other_pert": 0.5, "same_s_other_context": 0.5})
-    neg_p, neg_c = sampler.sample(np.arange(len(real)), np.random.default_rng(seed))
+
+
+def _val_scores(model, fa, rows, batch=4096, seed=12345) -> dict:
+    """Discriminator logits on the validation rows: each row under its own label
+    (``pos``) and under a swapped label (``perm``, drawn as in training)."""
+    device = next(model.parameters()).device
+    neg_p, neg_c = _sampler(fa, rows).sample(np.arange(len(rows)), np.random.default_rng(seed))
     model.eval()
     t = lambda a: torch.from_numpy(np.asarray(a)).to(device)
     from extract.models.group_lasso import group_batches, group_keys
-    gkey = group_keys(fa["perturbation_idx"], fa["context_idx"], is_real)
+    gkey = group_keys(fa["perturbation_idx"], fa["context_idx"])
     lasso = model.config.coding == "group_lasso"
 
     def logits(idx, p, c):
@@ -167,10 +162,8 @@ def _val_scores(model, fa, rows, is_real, synth_level, batch=4096, seed=12345) -
                 out[b] = model.score(z, t(p[b]), t(c[b])).cpu().numpy()
         return out
 
-    return {"pos": logits(real, fa["perturbation_idx"][real], fa["context_idx"][real]),
-            "perm": logits(real, neg_p, neg_c),
-            "syn": logits(syn, fa["perturbation_idx"][syn], fa["context_idx"][syn]),
-            "syn_level": np.asarray(synth_level)[syn]}
+    return {"pos": logits(rows, fa["perturbation_idx"][rows], fa["context_idx"][rows]),
+            "perm": logits(rows, neg_p, neg_c)}
 
 
 def main() -> int:
@@ -180,24 +173,15 @@ def main() -> int:
                     default=paths.root()/"splits"/"pair_seed0_ctxshuffle_pgenes_disjoint_min100_noMT")
     ap.add_argument("--out-dir", type=Path, default=paths.root()/"sweep_grid")
     ap.add_argument("--d", nargs="+", type=int, default=[20])
-    ap.add_argument("--alpha", nargs="+", type=float,
-                    default=[700])
-    ap.add_argument("--beta", nargs="+", type=float, default=[1.0])
-    ap.add_argument("-K","--n-subsamples", nargs="+", type=int, default=[10])
+    ap.add_argument("--alpha", nargs="+", type=float, default=[700])
+    ap.add_argument("-K","--n-subsamples", nargs="+", type=int, default=[10],
+                    help="pseudobulk rows per pair used in training (besides the full row)")
     ap.add_argument("--seeds", nargs="+", type=int, default=[0,1,2])
     ap.add_argument("--epochs", type=int, default=1000)
+    ap.add_argument("--min-epochs", type=int, default=None,
+                    help="accepted for older job scripts; every model trains --epochs epochs")
     ap.add_argument("--batch-size", type=int, default=1024)
-    ap.add_argument("--patience", type=int, default=0)
-    ap.add_argument("--min-epochs", type=int, default=1000,
-                    help="never stop before this; the best epoch is still restored")
     ap.add_argument("--eval-every", type=int, default=3)
-    ap.add_argument("--shuffled-frac", type=float, default=0.0,
-                    help="share of synthetic (gene-shuffled) negatives; 0 (default) = label swaps only")
-    ap.add_argument("--shuffle-levels", type=float, nargs="+", default=None,
-                    help="graded synthetic rows: take each row's twin from one of "
-                         "these gene-shuffle fractions (e.g. 0.2 0.4 0.6 0.8 1.0); "
-                         "the number of synthetic rows is unchanged, validation "
-                         "and test report accuracy per level. Default: 1.0 only")
     ap.add_argument("--val-frac", type=float, default=0.1)
     ap.add_argument("--perturbation-half", type=int, choices=[0, 1], default=None,
                     help="train and validate on one random half of the perturbations only "
@@ -208,47 +192,26 @@ def main() -> int:
                          "halves, so models of the two halves share one subspace; adds _sharedV")
     ap.add_argument("--val-seed", type=int, default=0)
     ap.add_argument("--draw-seed", type=int, default=0)
-    ap.add_argument("--select-on", default="auc",
-                    choices=["total", "accuracy", "disc", "recon", "auc"],
-                    help="validation metric early stopping selects on. "
-                         "accuracy (default): val BCE rises from epoch ~0-3 "
-                         "as the head grows over-confident while val "
-                         "accuracy keeps climbing for 100 epochs, so "
-                         "'total' picks near-untrained models. B is saved "
-                         "at every evaluation (B_evals_<tag>.npz) so the "
-                         "epoch can be re-chosen under another rule")
     ap.add_argument("--device", default="cpu")
     ap.add_argument("--queue", action="store_true",
-                    help="shared work queue: any number of workers (GPU or "
-                         "CPU, any host) may point at the SAME --out-dir; each "
-                         "cell is claimed atomically (claims/<tag>.claim) and "
-                         "its metrics row written to cells/<tag>.csv. Cells "
-                         "run in descending K (longest first); a worker only "
-                         "takes the K values it was given")
-    ap.add_argument("--subspace", nargs="+", default=["fixed"],
-                    choices=["free", "fixed", "anchored", "frozen"],
-                    help="how span(B) is set; a grid dimension. fixed / anchored use "
-                         "the label-driven subspace from the subsample noise "
-                         "(extract.data.noise); tags get a _<mode> suffix")
+                    help="shared work queue: any number of workers (GPU or CPU, any host) may "
+                         "point at the SAME --out-dir; each cell is claimed atomically "
+                         "(claims/<tag>.claim) and its metrics row written to cells/<tag>.csv")
+    ap.add_argument("--subspace", nargs="+", default=["fixed"], choices=["free", "fixed"],
+                    help="fixed: B = A V; free: B learned directly. A grid dimension")
     ap.add_argument("--basis", nargs="+", default=None, metavar="NAME=PATH",
-                    help="external axes for fixed / frozen, e.g. ica=B_ica_d26.npy "
-                         "(a [d, G] .npy); a grid dimension. Default: the "
-                         "label-driven subspace V. Tags get _<mode>_<name>")
+                    help="external subspaces for the fixed mode, e.g. ica=B_ica.npy (a [d, G] "
+                         ".npy); a grid dimension. Default: V from --subspace-method")
     ap.add_argument("--head-basis", nargs="+", default=["linear,square,abs,tanh"],
-                    help="statistics the head applies to each factor, one comma-"
-                         "separated set per grid value, e.g. abs  linear,abs. "
-                         "Non-default sets add _head-<names> to the tag")
-    ap.add_argument("--axes-init", default="jd", choices=["identity", "random", "jd"],
-                    help="fixed mode: start A at the identity, at a random rotation "
-                         "(per seed; adds _Arandom) or at the joint-diagonalisation axes "
-                         "of the per-context covariances (adds _Ajd)")
-    ap.add_argument("--axes-init-jitter", type=float, default=0.0,
-                    help="with --axes-init jd: rotate the JD axes by expm(t S), S random per "
-                         "seed; adds _jit<t>")
+                    help="statistics the head applies to each factor, one comma-separated set "
+                         "per grid value. Non-default sets add _head-<names> to the tag")
+    ap.add_argument("--axes-init", default="jd", choices=["random", "jd"],
+                    help="start A at the joint-diagonalisation axes (adds _Ajd) or at a random "
+                         "rotation per seed (adds _Arandom)")
     ap.add_argument("--label-weight-decay", type=float, default=0.01,
                     help="AdamW weight decay on the label network only; adds _lwd<x>")
     ap.add_argument("--label-dropout", type=float, default=0.2,
-                    help="dropout in the MLP label network; adds _ldo<x>")
+                    help="dropout in the label network; adds _ldo<x>")
     ap.add_argument("--embedding-dim", type=int, default=64, help="perturbation embedding size")
     ap.add_argument("--context-embedding-dim", type=int, default=8, help="context embedding size")
     ap.add_argument("--context-embedding-init", choices=["random", "control-means"], default="control-means",
@@ -260,64 +223,39 @@ def main() -> int:
     ap.add_argument("--pert-embedding-init", choices=["random", "response"], default="response",
                     help="start perturbation embeddings at random or from how each target "
                          "gene responds across the training pairs; response adds _embresp")
-    ap.add_argument("--head-variance", choices=["shared", "label"], default="shared",
-                    help="distance head: one variance per factor, or predicted per label "
-                         "and factor; label adds _hvar to the tag")
     ap.add_argument("--coding", choices=["ls", "group_lasso"], default="group_lasso",
-                    help="activities: masked least squares, or a group lasso with one selection "
-                         "of programs per (perturbation, context) pair; group_lasso adds "
-                         "_gl<lambda> to the tag")
+                    help="activities: the group lasso with one selection of programs per "
+                         "(perturbation, context) pair (adds _gl<lambda>), or plain least squares")
     ap.add_argument("--lasso-lambda", type=float, default=0.0272)
     ap.add_argument("--lasso-steps", type=int, default=30)
     ap.add_argument("--no-lasso-refit", action="store_true",
                     help="give the discriminator the raw lasso activities instead of the "
                          "least-squares refit on the selected programs; adds _norefit")
     ap.add_argument("--gene-sparsity", type=float, default=0.05,
-                    help="weight gamma of the gene-side prior: sum_k (1 - share of program k's "
-                         "weight in its --gene-topk genes); adds _gs<gamma> (and _k<k> if not 200)")
-    ap.add_argument("--gene-topk", type=int, default=200)
-    ap.add_argument("--gene-prior", choices=["topk", "l1"], default="l1",
-                    help="gene-side measure: share in the top-k genes, or L1/L2 sparseness "
-                         "(heavy-tailed loadings; adds _l1)")
+                    help="gamma, weight of the L1/L2 sparseness of each program's loadings; adds _gs<gamma>")
     ap.add_argument("--distinct-weight", type=float, default=100.0,
                     help="mu: penalise programs with |cos| above --distinct-tau (adds _dt<tau>)")
     ap.add_argument("--distinct-tau", type=float, default=0.5)
-    ap.add_argument("--sparsity", type=float, default=0.0,
-                   help="weight of the activity-sparsity penalty (0 = off); adds _sparse<w> to the tag")
-    ap.add_argument("--head", default="statistics", choices=["statistics", "distance"],
-                   help="discriminator head: per-factor statistics (default) or the distance "
-                        "between measured and predicted activity; distance adds _dist to the tag")
-    ap.add_argument("--head-normaliser", action=argparse.BooleanOptionalAction, default=True,
-                    help="statistics head: the label also predicts a per-program term c_k(p, c) "
-                         "subtracted from the score (a learned normaliser); adds _norm to the tag")
-    ap.add_argument("--label-model", default="mlp", choices=["mlp", "product", "ammi"],
-                    help="label -> lambda map: unconstrained MLP, the structured "
-                         "product f(p) * g(c), or ammi a(p) + b(c) + f(p) * g(c); "
-                         "non-mlp adds _<label-model> to the tag")
     ap.add_argument("--subspace-method", choices=["rca", "snr", "pca"], default="pca",
-                    help="how V is computed: reliable components analysis (default), "
-                         "signal over the within-pair noise model, or PCA of the pair means; "
-                         "adds _rca<rank> / _snr / _pca to the tag")
+                    help="how V is computed: PCA of the pair means (default), reliable components "
+                         "analysis, or signal over the within-pair noise model; adds _pca / _rca<rank> / _snr")
     ap.add_argument("--free-init", choices=["random", "basis"], default="random",
                     help="free mode: B starts at random, or where the fixed model starts "
-                         "(A0 V, with A0 from --axes-init); basis adds _initV<method> to the tag")
+                         "(A0 V); basis adds _initV<method> to the tag")
     ap.add_argument("--rca-rank", type=int, default=100,
                     help="RCA: R_W truncated to its top RANK eigen-directions")
     ap.add_argument("--noise-rank", type=int, default=50,
-                    help="rank of the correlated-noise part of the noise model")
+                    help="rank of the correlated-noise part of the noise model (snr)")
     ap.add_argument("--noise-max-rows", type=int, default=150_000,
-                    help="subsample residuals used to fit the noise model")
+                    help="within-pair residuals used to fit the noise model (snr)")
     ap.add_argument("--no-test", action="store_true",
-                    help="skip the test read entirely (strictest discipline)")
+                    help="accepted for older job scripts; the test partition is never read here")
     args = ap.parse_args()
     args.out_dir.mkdir(parents=True, exist_ok=True)
     csv = args.out_dir / "sweep_metrics.csv"
 
-    # ONE writer per directory. Two sweeps writing the same directory each
-    # read the done-set once, never see each other, rerun the same cells and
-    # overwrite each other's history files. That happened: a step that
-    # survived a "kill" of its local srun client kept writing for 12 h into the
-    # restarted run's directory, clobbering 72 cells. Refuse to start instead.
+    # ONE writer per directory (or the shared --queue): two sweeps writing the
+    # same directory would rerun the same cells and overwrite each other's files.
     import fcntl, os
     if args.queue:
         queue = _Queue(args.out_dir)
@@ -345,10 +283,7 @@ def main() -> int:
 
     # ---------------- load once --------------------------------------
     t0 = time.time()
-    levels = tuple(args.shuffle_levels) if args.shuffle_levels else None
-    Xtv, mtv, genes = load_partition(args.split_dir, "trainval", None,
-                                     shuffled=True, shuffle_seed=0,
-                                     shuffle_levels=levels)
+    Xtv, mtv, genes = load_partition(args.split_dir, "trainval", None)
     shared_bases = None
     if args.perturbation_half is not None and args.shared_subspace:
         # V from the training pairs of both halves; each half's validation pairs are
@@ -361,9 +296,9 @@ def main() -> int:
         shared_train = np.zeros(len(mtv), bool)
         for h_ in (0, 1):
             mh = perturbation_half(mtv.perturbation.to_numpy(), h_, args.half_seed)
-            idx = np.nonzero(mh)[0]; m_h = mtv[mh].reset_index(drop=True); r_h = m_h.is_real.to_numpy()
-            vp = set(_pair_key(m_h[r_h])[split_val_per_perturbation(m_h[r_h], args.val_frac, args.val_seed)])
-            shared_train[idx[r_h & ~_pair_key(m_h).isin(vp).to_numpy()]] = True
+            idx = np.nonzero(mh)[0]; m_h = mtv[mh].reset_index(drop=True)
+            vp = set(_pair_key(m_h)[split_val_per_perturbation(m_h, args.val_frac, args.val_seed)])
+            shared_train[idx[~_pair_key(m_h).isin(vp).to_numpy()]] = True
         shared_bases = {d_: pca_subspace(Xtv, pair_all, shared_train, d_, seed=args.draw_seed)[0]
                         for d_ in sorted(set(args.d))}
         for d_, Vb in shared_bases.items():
@@ -375,38 +310,27 @@ def main() -> int:
         Xtv, mtv = Xtv[keep_h], mtv[keep_h].reset_index(drop=True)
         print(f"perturbation half {args.perturbation_half} (seed {args.half_seed}): "
               f"{mtv.perturbation.nunique():,} perturbations", flush=True)
-    real = mtv.is_real.to_numpy()
-    val_real = split_val_per_perturbation(mtv[real], args.val_frac, args.val_seed)
-    val_pairs = set(_pair_key(mtv[real])[val_real])
+    val_real = split_val_per_perturbation(mtv, args.val_frac, args.val_seed)
+    val_pairs = set(_pair_key(mtv)[val_real])
     val_all = _pair_key(mtv).isin(val_pairs).to_numpy()
     print(f"trainval {len(mtv):,} rows x {len(genes):,} genes, "
           f"{len(val_pairs):,} val pairs  ({time.time()-t0:.0f}s)", flush=True)
 
-    Xte = mte = None
-    if not args.no_test:
-        Xte, mte, _ = load_partition(args.split_dir, "test", None,
-                                     shuffled=True, shuffle_seed=0,
-                                     shuffle_levels=levels)
-        kte = thin_synthetic(mte, args.shuffled_frac, seed=args.draw_seed)
-        Xte, mte = Xte[kte], mte[kte].reset_index(drop=True)
-        print(f"test {len(mte):,} rows", flush=True)
-
-    # ---- noise model and label-driven subspaces (train pairs only) -----
-    noise_model, bases = None, {}
+    # ---- the subspace V (train pairs only) ------------------------------------
+    bases = {}
     if set(args.subspace) - {"free"} or args.free_init == "basis":
         from extract.data.noise import (label_subspace, noise_covariance, pair_means,
                                         pca_subspace, rca_subspace, within_pair_residuals)
         t1 = time.time()
-        train_real = real & ~val_all
+        train_real = ~val_all
         pair = (mtv.perturbation.astype(str) + "|" + mtv.context.astype(str)).to_numpy()
-        if args.subspace_method == "snr" or "anchored" in args.subspace:
+        if args.subspace_method == "snr":
             R = within_pair_residuals(Xtv, pair, train_real, max_rows=args.noise_max_rows,
                                       seed=args.draw_seed)
             noise_model = noise_covariance(R, rank=args.noise_rank, seed=args.draw_seed)
             del R
             np.savez(args.out_dir / "noise_model.npz", diag=noise_model.diag,
                      U=noise_model.U, s=noise_model.s)
-        if args.subspace_method == "snr":
             _, means, counts = pair_means(Xtv, pair, train_real)
         for d_ in sorted(set(args.d)):
             if args.subspace_method == "pca":
@@ -420,68 +344,51 @@ def main() -> int:
             else:
                 bases[d_], ev = label_subspace(means, counts, noise_model, d_)
                 np.save(args.out_dir / f"subspace_V_snr_d{d_}.npy", bases[d_])
-        print(f"label subspaces ({args.subspace_method}) for d={sorted(bases)} from the "
+        print(f"subspaces ({args.subspace_method}) for d={sorted(bases)} from the "
               f"train pairs  ({time.time()-t1:.0f}s)", flush=True)
         if shared_bases is not None:
             bases = shared_bases
             print("using the subspace shared by both halves", flush=True)
 
-    # NAME=PATH loads external axes; a bare "V" means the label-driven subspace
+    # NAME=PATH loads an external subspace
     ext_bases = {}
     for kv in (args.basis or []):
         name, _, path = kv.partition("=")
         ext_bases[name] = np.load(path).astype(np.float32) if path else None
     basis_names = list(ext_bases) or [None]
-    cells = [c for c in itertools.product(args.d, args.alpha, args.beta,
-                                          args.n_subsamples, args.seeds, args.subspace,
-                                          basis_names, args.head_basis)
-             if c[5] in ("fixed", "frozen") or c[6] == basis_names[0]]
+    cells = [c for c in itertools.product(args.d, args.alpha, args.n_subsamples, args.seeds,
+                                          args.subspace, basis_names, args.head_basis)
+             if c[4] == "fixed" or c[5] == basis_names[0]]
     if queue is not None:
-        # longest first (cost grows with K): the expensive cells start early
-        # and the cheap ones fill the tail, which shortens the makespan
-        cells.sort(key=lambda c: -c[3])
+        # longest first (cost grows with K)
+        cells.sort(key=lambda c: -c[2])
     print(f"{len(cells)} cells, {len(cells)-len(done)} to run\n", flush=True)
 
-    records = []
-    for i, (d, a, b, K, seed, sub, bname, hbasis) in enumerate(cells, 1):
+    for i, (d, a, K, seed, sub, bname, hbasis) in enumerate(cells, 1):
         head = tuple(hbasis.split(","))
-        named = bname is not None and sub in ("fixed", "frozen")
+        named = bname is not None and sub == "fixed"
         use_ext = named and ext_bases[bname] is not None
-        tag = (f"d{d}_a{a:g}_b{b:g}_K{K}_seed{seed}" + ("" if sub == "free" else f"_{sub}")
+        tag = (f"d{d}_a{a:g}_K{K}_seed{seed}" + ("" if sub == "free" else f"_{sub}")
                + (f"_{bname}" if named else "")
                + ("" if head == ("linear", "square", "abs", "tanh") else f"_head-{'-'.join(head)}")
-               + ("_Arandom" if args.axes_init == "random" and sub == "fixed" else "")
-               + (("_Ajd" + (f"_jit{args.axes_init_jitter:g}" if args.axes_init_jitter else ""))
-                  if args.axes_init == "jd" and sub == "fixed" else "")
-               + ("" if args.label_model == "mlp" else f"_{args.label_model}")
+               + (f"_A{args.axes_init}" if sub == "fixed" else "")
                + ((f"_initV{args.subspace_method}" + ("_Arandom" if args.axes_init == "random" else "")
                    if args.free_init == "basis" else "") if sub == "free"
                   else {"snr": "_snr", "pca": "_pca"}.get(args.subspace_method, f"_rca{args.rca_rank}"))
-               + ("_dist" if args.head == "distance" else "")
-               + ("_norm" if args.head_normaliser and args.head == "statistics" else "")
-               + ("_hvar" if args.head_variance == "label" else "")
                + (f"_lwd{args.label_weight_decay:g}" if args.label_weight_decay else "")
                + (f"_ldo{args.label_dropout:g}" if args.label_dropout else "")
                + ("_embresp" if args.pert_embedding_init == "response" else "")
                + ("_ctxctrl" if args.context_embedding_init == "control-means" else "")
-               + (f"_emb{args.embedding_dim}x{args.context_embedding_dim}"
-                  if (args.embedding_dim, args.context_embedding_dim) != (32, 32) else "")
-               + (f"_sparse{args.sparsity:g}" if args.sparsity else "")
-               + ((f"_gs{args.gene_sparsity:g}" + ("_l1" if args.gene_prior == "l1" else
-                                                    f"_k{args.gene_topk}" if args.gene_topk != 200 else ""))
-                  if args.gene_sparsity else "")
+               + f"_emb{args.embedding_dim}x{args.context_embedding_dim}"
+               + (f"_gs{args.gene_sparsity:g}" if args.gene_sparsity else "")
                + ((f"_dt{args.distinct_tau:g}" + (f"_dw{args.distinct_weight:g}" if args.distinct_weight != 100 else ""))
                   if args.distinct_weight else "")
-               # only permuted-label negatives (no shuffled rows): one per measured row
-               + ("_noshuf" if args.shuffled_frac == 0 else
-                  f"_sf{args.shuffled_frac:g}" if args.shuffled_frac != 0.5 else "")
                + (f"_gl{args.lasso_lambda:g}" + ("_norefit" if args.no_lasso_refit else "")
-                  if args.coding == "group_lasso" else "")
+                  if args.coding == "group_lasso" else "_ls")
                + (f"_half{args.perturbation_half}s{args.half_seed}"
                   + ("_sharedV" if args.shared_subspace else "")
                   if args.perturbation_half is not None else ""))
-        # re-read each time: cheap, and means a cell finished by any earlier
-        # or concurrent process is never repeated
+        # re-read each time: a cell finished by any concurrent process is never repeated
         if queue is not None:
             if tag in queue.done() or not queue.claim(tag):
                 continue
@@ -492,10 +399,7 @@ def main() -> int:
                 continue
         t = time.time()
         keep = subsample_mask(mtv, K, seed=args.draw_seed) | val_all
-        keep &= thin_synthetic(mtv, args.shuffled_frac, seed=args.draw_seed)
         X, meta, val = Xtv[keep], mtv[keep].reset_index(drop=True), val_all[keep]
-        is_real = meta.is_real.to_numpy()
-        synth_level = meta.shuffle_frac.to_numpy(dtype=float)
         fa = prepare(X, meta, genes)
         plev, clev = fa.pop("perturbation_levels"), fa.pop("context_levels")
         ctx_init = None
@@ -503,31 +407,26 @@ def main() -> int:
             from extract.train import control_mean_embeddings
             cm = pd.read_parquet(args.context_means or paths.root() / "context_control_means.parquet")
             ctx_init = control_mean_embeddings(cm, clev, args.context_embedding_dim)
-        cfg = TrainConfig(n_factors=d, alpha=a, recon_fake_weight=b, seed=seed,
+        cfg = TrainConfig(n_factors=d, alpha=a, seed=seed,
                           epochs=args.epochs, batch_size=args.batch_size,
                           device=args.device, log_every=0,
-                          eval_every=args.eval_every, patience=args.patience,
-                          min_epochs=args.min_epochs,
-                          select_on=args.select_on, subspace=sub, basis=head,
-                          axes_init=args.axes_init, label_model=args.label_model, head=args.head,
-                          sparsity=args.sparsity, head_variance=args.head_variance,
+                          eval_every=args.eval_every, subspace=sub, basis=head,
+                          axes_init=args.axes_init,
                           subspace_method=args.subspace_method, rca_rank=args.rca_rank,
+                          noise_rank=args.noise_rank, noise_max_rows=args.noise_max_rows,
                           free_init=args.free_init, pert_embedding_init=args.pert_embedding_init,
                           embedding_dim=args.embedding_dim,
                           context_embedding_dim=args.context_embedding_dim,
                           label_weight_decay=args.label_weight_decay,
                           label_dropout=args.label_dropout,
-                          axes_init_jitter=args.axes_init_jitter, head_normaliser=args.head_normaliser,
-                          gene_sparsity=args.gene_sparsity, gene_topk=args.gene_topk,
-                          gene_prior=args.gene_prior, distinct_weight=args.distinct_weight,
+                          gene_sparsity=args.gene_sparsity, distinct_weight=args.distinct_weight,
                           distinct_tau=args.distinct_tau,
                           coding=args.coding, lasso_lambda=args.lasso_lambda,
                           lasso_steps=args.lasso_steps, lasso_refit=not args.no_lasso_refit)
         snaps: dict[int, np.ndarray] = {}
         model, hist = fit(config=cfg, train_rows=~val, val_rows=val,
-                          is_real=is_real, synth_level=synth_level,
                           subspace_basis=(ext_bases[bname] if use_ext else bases.get(d)),
-                          noise_model=noise_model, context_embedding_init=ctx_init,
+                          context_embedding_init=ctx_init,
                           on_eval=lambda ep, m: snaps.__setitem__(ep, m.loading_matrix().copy()),
                           **fa)
         pd.DataFrame(hist).to_csv(args.out_dir/f"history_{tag}.csv", index=False)
@@ -535,8 +434,6 @@ def main() -> int:
         ep = np.array(sorted(snaps))
         np.savez(args.out_dir/f"B_evals_{tag}.npz", epoch=ep,
                  B=np.stack([snaps[e] for e in ep]).astype(np.float32))
-        # the selected model's parameters, and its validation scores, for ROC
-        # curves and any later re-scoring
         # everything needed to re-score the model later: the selected and the
         # last epoch's parameters, and the configuration they were trained with
         torch.save({k: v.detach().cpu() for k, v in model.state_dict().items()},
@@ -551,61 +448,29 @@ def main() -> int:
              "split_dir": str(args.split_dir), "tag": tag}, indent=1, default=str))
         np.save(args.out_dir/f"levels_{tag}.npy",
                 np.array([plev, clev], dtype=object), allow_pickle=True)
-        np.savez(args.out_dir/f"val_scores_{tag}.npz",
-                 **_val_scores(model, fa, np.nonzero(val)[0], is_real, synth_level))
+        np.savez(args.out_dir/f"val_scores_{tag}.npz", **_val_scores(model, fa, np.nonzero(val)[0]))
 
         X_t = torch.from_numpy(fa["X"]); col_t = torch.from_numpy(fa["target_col"])
-        w_t = None                                    # every row weighs the same
-
-        def score(fa_, rows, Xt_, ct_, wt_):
-            s = StratifiedNegativeSampler(
-                perturbation_idx=fa_["perturbation_idx"][rows],
-                context_idx=fa_["context_idx"][rows],
-                stratum=np.zeros(len(rows), dtype=np.int64),
-                n_perturbations=int(fa_["perturbation_idx"].max())+1,
-                n_contexts=int(fa_["context_idx"].max())+1,
-                weights={"same_s_other_pert":0.5,"same_s_other_context":0.5})
-            # evaluate() indexes is_real by `rows` itself -- pass the FULL array
-            return evaluate(model, Xt_, fa_["perturbation_idx"], fa_["context_idx"],
-                            rows, s, np.random.default_rng(12345), ct_, wt_,
-                            is_real=fa_["is_real"], recon_fake_weight=b,
-                            synth_level=fa_.get("synth_level"))
-
-        fa["is_real"] = is_real
-        fa["synth_level"] = synth_level
-        row = {"tag": tag, "d": d, "alpha": a, "beta": b, "K": K, "seed": seed,
+        row = {"tag": tag, "d": d, "alpha": a, "K": K, "seed": seed,
                "subspace": sub, "head_basis": ",".join(head), "basis": (bname if named else ("V" if sub != "free" else "")),
-               "label_model": args.label_model, "head": args.head, "head_variance": args.head_variance, "sparsity": args.sparsity,
                "subspace_method": args.subspace_method, "rca_rank": args.rca_rank,
                "free_init": args.free_init, "pert_embedding_init": args.pert_embedding_init,
                "embedding_dim": args.embedding_dim, "context_embedding_dim": args.context_embedding_dim,
                "context_embedding_init": args.context_embedding_init,
                "label_weight_decay": args.label_weight_decay, "label_dropout": args.label_dropout,
-               "axes_init": args.axes_init, "axes_init_jitter": args.axes_init_jitter,
-               "head_normaliser": args.head_normaliser, "shuffled_frac": args.shuffled_frac,
-               "gene_sparsity": args.gene_sparsity, "gene_topk": args.gene_topk,
-               "gene_prior": args.gene_prior, "distinct_weight": args.distinct_weight,
+               "axes_init": args.axes_init,
+               "gene_sparsity": args.gene_sparsity, "distinct_weight": args.distinct_weight,
                "distinct_tau": args.distinct_tau,
                "coding": args.coding, "lasso_lambda": args.lasso_lambda,
                "lasso_steps": args.lasso_steps, "lasso_refit": not args.no_lasso_refit,
+               "perturbation_half": args.perturbation_half, "half_seed": args.half_seed,
+               "shared_subspace": args.shared_subspace,
                "epochs_run": len(hist), "seconds": round(time.time()-t, 1)}
         for name, rows_ in (("train", np.nonzero(~val)[0]), ("val", np.nonzero(val)[0])):
-            m = score(fa, rows_, X_t, col_t, w_t)
-            for k in METRICS + tuple(k for k in m if k.startswith(("synth_accuracy_f", "recon_synth_f"))):
+            m = evaluate(model, X_t, fa["perturbation_idx"], fa["context_idx"], rows_,
+                         _sampler(fa, rows_), np.random.default_rng(12345), col_t, None)
+            for k in METRICS:
                 row[f"{name}_{k}"] = m.get(k)
-        if Xte is not None:
-            fte = prepare(Xte, mte, genes, perturbation_levels=plev,
-                          context_levels=clev)
-            fte.pop("perturbation_levels", None); fte.pop("context_levels", None)
-            fte["is_real"] = mte.is_real.to_numpy()
-            fte["synth_level"] = mte.shuffle_frac.to_numpy(dtype=float)
-            m = score(fte, np.arange(len(mte)),
-                      torch.from_numpy(fte["X"]),
-                      torch.from_numpy(fte["target_col"]),
-                      None)
-            for k in METRICS + tuple(k for k in m if k.startswith(("synth_accuracy_f", "recon_synth_f"))):
-                row[f"test_{k}"] = m.get(k)
-        records.append(row)
         if queue is not None:
             queue.finish(tag, row)
         else:
@@ -616,7 +481,7 @@ def main() -> int:
         print(f"[{i}/{len(cells)}] {tag:<26} "
               f"disc {row['train_disc']:.4f}/{row['val_disc']:.4f}  "
               f"recon {row['train_recon']:.6f}/{row['val_recon']:.6f}  "
-              f"val acc {row['val_accuracy']:.4f}  {row['seconds']:.0f}s", flush=True)
+              f"val auc {row['val_auc']:.4f}  {row['seconds']:.0f}s", flush=True)
     (args.out_dir/"sweep_config.json").write_text(json.dumps(vars(args), default=str, indent=2))
     print("\nSWEEP DONE")
     return 0

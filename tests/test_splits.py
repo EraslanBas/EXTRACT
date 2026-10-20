@@ -14,7 +14,6 @@ from extract.data.splits import (
     load_partition,
     split_val_per_perturbation,
     subsample_mask,
-    thin_synthetic,
 )
 
 
@@ -100,21 +99,6 @@ def test_subsample_mask_is_a_function_of_the_pair_not_the_row_set():
     assert (both[: len(m)] == both[len(m):]).all()
 
 
-def test_thin_synthetic_keeps_all_real_rows():
-    m = _meta(ragged=False)
-    both = pd.concat([m.assign(is_real=True),
-                      m.assign(is_real=False, row_id=m.row_id + "|shuffled")],
-                     ignore_index=True)
-    keep = thin_synthetic(both, 0.5, seed=0)
-    assert keep[both.is_real].all()
-    n_syn = int((keep & ~both.is_real).sum())
-    assert abs(n_syn - 0.5 * len(m)) < 0.05 * len(m)
-    # nested in frac, and independent of which other rows are loaded
-    assert not (thin_synthetic(both, 0.3, seed=0) & ~keep).any()
-    half = both.iloc[len(m) // 2:]
-    assert (thin_synthetic(half, 0.5, seed=0) == keep[len(m) // 2:]).all()
-
-
 def _write_matrices(d, meta, n_genes=12, seed=0):
     rng = np.random.default_rng(seed)
     genes = [f"G{j}" for j in range(n_genes)]
@@ -135,7 +119,7 @@ def test_build_split_isolates_the_partitions(tmp_path):
     genes = _write_matrices(mats, meta)
     out = tmp_path / "split"
     man = build_split(mats, out, test_frac=0.2, split_seed=0,
-                      min_affected=5, threshold=0.2, shuffle_within="partition")
+                      min_affected=5, threshold=0.2)
 
     test_pairs = set(map(tuple, pd.read_csv(out / "test_pairs.tsv", sep="\t")
                          .astype(str).to_numpy()))
@@ -145,16 +129,9 @@ def test_build_split_isolates_the_partitions(tmp_path):
     assert list(g) == list(g2) and "G0" not in set(g)
     assert set(zip(mtv.perturbation, mtv.context)).isdisjoint(test_pairs)
     assert set(zip(mte.perturbation, mte.context)) == test_pairs
-    assert len(mtv[mtv.is_real]) + len(mte[mte.is_real]) == len(meta)
+    assert len(mtv) + len(mte) == len(meta) and len(Xtv) == len(mtv)
     assert man["partitions"]["test"]["pairs"] == len(test_pairs)
-
-    # synthetic rows are column permutations WITHIN their own partition and
-    # context: each gene's multiset of values is preserved there
-    for m, X in ((mtv, Xtv), (mte, Xte)):
-        for ctx in m.context.unique():
-            r = ((m.context == ctx) & m.is_real).to_numpy()
-            f = ((m.context == ctx) & ~m.is_real).to_numpy()
-            assert np.allclose(np.sort(X[r], 0), np.sort(X[f], 0))
+    assert not list(out.glob("*/*shuffled*"))           # only measured rows are written
 
     # the gene list was decided on train/val full-data rows only
     header = (out / "gene_list.tsv").read_text().splitlines()[1]
@@ -168,47 +145,8 @@ def test_build_split_isolates_the_partitions(tmp_path):
     assert json.loads((out / "manifest.json").read_text())["split_seed"] == 0
 
 
-def test_build_split_shuffles_over_the_whole_context(tmp_path):
-    """shuffle_within='context': one column shuffle over ALL of a context's
-    rows, before the split. Per gene the multiset of values is preserved over
-    the context (not per partition), each synthetic row keeps its twin's label
-    and partition, and the real rows and test pairs are unchanged."""
-    meta = _meta(n_pert=40, n_ctx=4, ragged=True)
-    mats = tmp_path / "matrices"; mats.mkdir()
-    _write_matrices(mats, meta)
-    ctx_out, part_out = tmp_path / "ctx", tmp_path / "part"
-    man = build_split(mats, ctx_out, test_frac=0.2, split_seed=0,
-                      min_affected=5, threshold=0.2, shuffle_within="context")
-    build_split(mats, part_out, test_frac=0.2, split_seed=0,
-                min_affected=5, threshold=0.2, shuffle_within="partition")
-    assert man["shuffled_within"].startswith("context")
-    assert ((ctx_out / "test_pairs.tsv").read_text()
-            == (part_out / "test_pairs.tsv").read_text())
-    assert ((ctx_out / "gene_list.tsv").read_text()
-            == (part_out / "gene_list.tsv").read_text())
-
-    parts = {p: load_partition(ctx_out, p) for p in ("trainval", "test")}
-    crossed = False
-    for ctx in meta.context.astype(str).unique():
-        real, fake = [], []
-        for p, (X, m, _) in parts.items():
-            here = (m.context.astype(str) == ctx).to_numpy()
-            r, f = here & m.is_real.to_numpy(), here & ~m.is_real.to_numpy()
-            # twins: same labels, same order, same partition
-            assert (m.label[r].to_numpy() == m.label[f].to_numpy()).all()
-            real.append(X[r]); fake.append(X[f])
-            if not np.allclose(np.sort(X[r], 0), np.sort(X[f], 0)):
-                crossed = True
-        assert np.allclose(np.sort(np.vstack(real), 0), np.sort(np.vstack(fake), 0))
-    assert crossed, "values never crossed partitions: shuffle was not context-wide"
-
-    Xa, ma, _ = load_partition(ctx_out, "trainval", shuffled=False)
-    Xb, mb, _ = load_partition(part_out, "trainval", shuffled=False)
-    assert np.array_equal(Xa, Xb) and ma.row_id.equals(mb.row_id)
-
-
-def test_fit_model_script_runs_on_a_split(tmp_path):
-    """End to end: build a split, fit on trainval, score test once."""
+def test_fit_model_and_the_single_test_read(tmp_path):
+    """End to end: build a split, fit one model on trainval, read test once."""
     import subprocess
     import sys
     from pathlib import Path
@@ -219,82 +157,27 @@ def test_fit_model_script_runs_on_a_split(tmp_path):
     split = tmp_path / "split"
     build_split(mats, split, test_frac=0.15, min_affected=5, threshold=0.2)
 
-    script = Path(__file__).resolve().parents[1] / "scripts" / "fit_model.py"
+    scripts = Path(__file__).resolve().parents[1] / "scripts"
     out = tmp_path / "models"
     proc = subprocess.run(
-        [sys.executable, str(script), "--split-dir", str(split), "--out-dir", str(out),
-         "-d", "3", "-K", "3", "--beta", "0.1", "--epochs", "3", "--batch-size", "64",
-         "--eval-every", "1", "--patience", "0"],
+        [sys.executable, str(scripts / "fit_model.py"), "--split-dir", str(split),
+         "--out-dir", str(out), "-d", "3", "-K", "3", "--epochs", "3", "--batch-size", "64",
+         "--eval-every", "1", "--context-embedding-init", "random"],
         capture_output=True, text=True,
     )
     assert proc.returncode == 0, proc.stdout[-2000:] + proc.stderr[-2000:]
-    summary = json.loads((out / "summary_d3_a1_b0.1_K3_seed0_fixed.json").read_text())
-    for part in ("train", "val", "test"):
-        assert 0.0 <= summary["metrics"][part]["accuracy"] <= 1.0
-        assert summary["metrics"][part]["n_synthetic"] > 0
-    assert summary["hyperparameters"] == {"d": 3, "alpha": 1.0, "beta": 0.1,
-                                          "K": 3, "rho": 0.5}
+    m = pd.read_csv(out / "sweep_metrics.csv")
+    assert len(m) == 1 and 0.0 <= m.val_auc.iloc[0] <= 1.0
+    tag = m.tag.iloc[0]
+    for f in ("model_best_", "model_final_", "config_", "history_", "levels_", "val_scores_"):
+        assert list(out.glob(f"{f}{tag}.*")), f
+    assert not any("test_" in c for c in m.columns)        # the sweep never reads test
 
-
-def test_graded_shuffle_levels(tmp_path):
-    """add_shuffle_levels writes partially shuffled twins; loading with levels
-    keeps the same rows and the same thinning, changes only which file each
-    twin comes from, and a fraction-f twin differs from its real row in about
-    a fraction f of genes."""
-    from extract.data.splits import (SHUFFLE_LEVELS, add_shuffle_levels,
-                                     assign_shuffle_levels, thin_synthetic)
-    meta = _meta(n_pert=60, n_ctx=8, ragged=False)
-    mats = tmp_path / "matrices"; mats.mkdir()
-    _write_matrices(mats, meta)
-    out = tmp_path / "split"
-    build_split(mats, out, test_frac=0.1, min_affected=5, threshold=0.2)
-    man = add_shuffle_levels(out, (0.2, 0.4, 0.6, 0.8), matrices_dir=mats)
-    assert man["shuffle_levels"] == [0.2, 0.4, 0.6, 0.8, 1.0]
-
-    X1, m1, _ = load_partition(out, "trainval")
-    Xg, mg, _ = load_partition(out, "trainval", shuffle_levels=SHUFFLE_LEVELS)
-    assert len(m1) == len(mg) and (m1.row_id == mg.row_id).all()
-    assert (thin_synthetic(m1, 0.5) == thin_synthetic(mg, 0.5)).all()
-    real = mg.is_real.to_numpy()
-    assert np.allclose(X1[real], Xg[real])
-    lev = mg.shuffle_frac.to_numpy()[~real]
-    assert set(np.unique(lev)) == set(SHUFFLE_LEVELS)
-    # roughly uniform over the five levels
-    counts = np.array([(lev == f).mean() for f in SHUFFLE_LEVELS])
-    assert np.all(np.abs(counts - 0.2) < 0.06), counts
-    # twins at fraction f leave about 1 - f of the genes at their real values
-    Xr, Xs = Xg[real], Xg[~real]
-    for f in (0.2, 0.6):
-        at = lev == f
-        same = np.isclose(Xr[at], Xs[at]).mean()
-        assert abs(same - (1 - f)) < 0.12, (f, same)
-    # assignment is fixed by row id alone
-    ids = mg.row_id.to_numpy()[real][:50]
-    assert (assign_shuffle_levels(ids) == assign_shuffle_levels(ids[::-1])[::-1]).all()
-
-
-def test_evaluate_reports_each_shuffle_level(tmp_path):
-    from extract.data.splits import SHUFFLE_LEVELS, add_shuffle_levels
-    from extract.train import TrainConfig, fit, prepare
-    meta = _meta(n_pert=60, n_ctx=8, ragged=False)
-    mats = tmp_path / "matrices"; mats.mkdir()
-    _write_matrices(mats, meta)
-    out = tmp_path / "split"
-    build_split(mats, out, test_frac=0.1, min_affected=5, threshold=0.2)
-    add_shuffle_levels(out, (0.2, 0.4, 0.6, 0.8), matrices_dir=mats)
-    X, m, genes = load_partition(out, "trainval", shuffle_levels=SHUFFLE_LEVELS)
-    from extract.data.splits import split_val_per_perturbation, _pair_key
-    real = m.is_real.to_numpy()
-    vp = set(_pair_key(m[real])[split_val_per_perturbation(m[real], 0.15, 0)])
-    val = _pair_key(m).isin(vp).to_numpy()
-    fa = prepare(X, m, genes); fa.pop("perturbation_levels"); fa.pop("context_levels")
-    cfg = TrainConfig(pert_embedding_init="random", n_factors=3, epochs=2, batch_size=64, eval_every=1,
-                      patience=0, log_every=0, select_on="accuracy")
-    _, hist = fit(config=cfg, train_rows=~val, val_rows=val, is_real=real,
-                  synth_level=m.shuffle_frac.to_numpy(dtype=float), **fa)
-    keys = {k for k in hist[-1] if k.startswith("val_synth_accuracy_f")}
-    assert keys == {f"val_synth_accuracy_f{f:g}" for f in SHUFFLE_LEVELS}
-    assert all(0.0 <= hist[-1][k] <= 1.0 for k in keys)
+    read = [sys.executable, str(scripts / "read_test.py"), str(out), "--tag", tag, "--reason", "unit test"]
+    proc = subprocess.run(read, capture_output=True, text=True)
+    assert proc.returncode == 0, proc.stdout[-2000:] + proc.stderr[-2000:]
+    assert "test_auc" in proc.stdout
+    assert subprocess.run(read, capture_output=True, text=True).returncode != 0   # a repeat is refused
 
 
 def test_perturbation_halves_partition_the_perturbations():

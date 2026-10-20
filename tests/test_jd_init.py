@@ -35,29 +35,11 @@ def test_jd_axes_recover_planted_programs():
     assert _match(B0, B).min() > 0.99
 
 
-def test_jitter_moves_the_axes_by_seed():
-    X, p, c, B, V = _context_variance_data()
-    rows = np.arange(len(X))
-    base = jd_axes(X, p, c, rows, V) @ V
-    j0 = jd_axes(X, p, c, rows, V, jitter=0.5, seed=0) @ V
-    j1 = jd_axes(X, p, c, rows, V, jitter=0.5, seed=1) @ V
-    assert 0.6 < _match(j0, base).mean() < 0.99
-    assert not np.allclose(j0, j1)
-    assert np.allclose(jd_axes(X, p, c, rows, V, jitter=0.5, seed=0) @ V, j0)
-
-
 def test_fit_starts_at_the_jd_axes():
     X, p, c, B, V = _context_variance_data(n_p=60)
-    cfg = TrainConfig(pert_embedding_init="random", n_factors=5, epochs=0, batch_size=128, log_every=0, seed=0, head="distance",
+    cfg = TrainConfig(pert_embedding_init="random", n_factors=5, epochs=0, batch_size=128, log_every=0, seed=0,
                       subspace="fixed", subspace_method="pca", axes_init="jd", noise_rank=2)
     model, _ = fit(X, p, c, config=cfg)
     expect = jd_axes(X, p, c, np.arange(len(X)), model.loadings.V.cpu().numpy())
     assert np.allclose(model.loadings.A.detach().cpu().numpy(), expect, atol=1e-5)
 
-
-def test_jitter_without_jd_is_rejected():
-    X, p, c, B, V = _context_variance_data(n_p=30)
-    cfg = TrainConfig(pert_embedding_init="random", n_factors=5, epochs=1, log_every=0, head="distance", subspace="fixed",
-                      subspace_method="pca", axes_init="random", axes_init_jitter=0.5, noise_rank=2)
-    with pytest.raises(ValueError):
-        fit(X, p, c, config=cfg)

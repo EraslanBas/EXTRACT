@@ -45,16 +45,9 @@ def test_fit_runs_with_the_normaliser_jd_start_and_group_lasso():
     X = (rng.standard_normal((36, 4))[np.repeat(np.arange(36), 4)] @ B
          + 0.1 * rng.standard_normal((len(p), 40))).astype(np.float32)
     val = np.zeros(len(X), bool); val[::5] = True
-    cfg = TrainConfig(pert_embedding_init="random", n_factors=4, epochs=6, batch_size=50, log_every=0, seed=0, head="statistics",
-                      head_normaliser=True, subspace="fixed", subspace_method="pca", axes_init="jd",
-                      noise_rank=2, eval_every=3, coding="group_lasso", lasso_lambda=0.05, lasso_steps=10,
-                      select_on="auc")
+    cfg = TrainConfig(pert_embedding_init="random", n_factors=4, epochs=6, batch_size=50, log_every=0, seed=0, subspace="fixed", subspace_method="pca", axes_init="jd",
+                      noise_rank=2, eval_every=3, coding="group_lasso", lasso_lambda=0.05, lasso_steps=10)
     model, history = fit(X, p, c, config=cfg, train_rows=~val, val_rows=val)
     assert model.head.normaliser and model.label_net.n_basis == 5
     assert history[-1]["disc"] < history[0]["disc"]
 
-
-def test_normaliser_needs_the_statistics_head():
-    with pytest.raises(ValueError):
-        fit(np.zeros((8, 10), np.float32), np.arange(8) % 2, np.arange(8) // 4,
-            config=TrainConfig(pert_embedding_init="random", n_factors=2, epochs=1, head="distance", head_normaliser=True, log_every=0))

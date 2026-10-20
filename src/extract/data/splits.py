@@ -6,15 +6,8 @@ inside a partition and never across one:
 
 * the gene list is computed from **train/val** full-data rows only, and the
   same list is applied to both partitions;
-* synthetic rows are column-shuffled within each context. ``shuffle_within``
-  chooses the pool: ``"context"`` (the default since 2026-09-29) shuffles all
-  of a context's rows before they are divided, so a synthetic row's values are
-  draws from the context's full per-gene marginals and may come from any
-  partition -- test values included; ``"partition"`` shuffles inside
-  (partition, context) only, so no test value lands in a train/val row. Either
-  way each synthetic row keeps its real twin's label and goes to that label's
-  partition;
-* negatives are drawn live, by a sampler built on one partition's rows.
+* negatives are drawn live (label swaps), by a sampler built on one
+  partition's rows.
 
 Layout written by :func:`build_split`::
 
@@ -24,7 +17,6 @@ Layout written by :func:`build_split`::
       gene_list.tsv          from train/val full-data rows only
       trainval/  test/
         <ctx>_real.parquet                label + genes, measured rows
-        <ctx>_shuffled_seed<k>.parquet    label + genes, same row order
         <ctx>_row_metadata.csv
 
 Two partitions only. Validation is drawn inside ``trainval`` at fit time with
@@ -44,7 +36,10 @@ import numpy as np
 import pandas as pd
 
 from .. import paths
-from .augment import SUB_RE, shuffle_matrix
+import re
+from dataclasses import dataclass, field
+
+SUB_RE = re.compile(r"__sub(\d+)$")
 from .gene_filter import gene_list_table, load_gene_list
 
 PARTITIONS = ("trainval", "test")
@@ -180,128 +175,6 @@ def subsample_mask(
     return keep
 
 
-def thin_synthetic(
-    meta: pd.DataFrame, frac: float, seed: int = 0
-) -> np.ndarray:
-    """Keep every measured row and about ``frac`` of the synthetic rows.
-
-    ``frac`` is relative to the synthetic rows present, which equal the
-    measured rows in number, so it is the synthetic share ``rho`` of the
-    negative budget once permuted negatives are balanced against it.
-
-    Each synthetic row is kept iff a hash of its ``row_id`` and ``seed`` falls
-    below ``frac``: the decision depends on the row alone, so it is the same
-    whichever other rows are loaded and nested across ``K`` and ``frac``.
-    """
-    if not 0.0 <= frac <= 1.0:
-        raise ValueError(f"frac must be in [0, 1], got {frac}")
-    real = meta.is_real.to_numpy(dtype=bool)
-    keep = real.copy()
-    synth = np.nonzero(~real)[0]
-    u = _stable_uniform(meta.row_id.astype(str).to_numpy()[synth], seed)
-    keep[synth] = u < frac
-    return keep
-
-
-# ---- graded synthetic rows ----------------------------------------------------
-
-#: Fractions of gene columns shuffled in a synthetic row. 1.0 is the original
-#: fully shuffled matrix; smaller fractions leave the rest of the row's genes at
-#: their real values, so the negative is harder to reject.
-SHUFFLE_LEVELS = (0.2, 0.4, 0.6, 0.8, 1.0)
-
-#: Salt for the level assignment, so it is independent of the keep/drop draw
-#: of :func:`thin_synthetic` (which hashes the same row ids with ``seed``).
-_LEVEL_SALT = 104_729
-
-
-def _shuffled_file(name: str, frac: float, seed: int) -> str:
-    """File name of a context's synthetic rows at one shuffle fraction. The
-    fully shuffled level keeps its original name, so older splits still load."""
-    if frac >= 1.0:
-        return f"{name}_shuffled_seed{seed}.parquet"
-    return f"{name}_shuffled_frac{frac:g}_seed{seed}.parquet"
-
-
-def assign_shuffle_levels(
-    row_ids, levels: tuple[float, ...] = SHUFFLE_LEVELS, seed: int = 0
-) -> np.ndarray:
-    """The shuffle fraction each measured row's synthetic twin is taken from.
-
-    Uniform over ``levels``, fixed by the row id alone, so it is the same in
-    every fit and nested across ``K``; independent of :func:`thin_synthetic`,
-    which therefore keeps exactly the synthetic rows it kept before levels
-    existed. The number of synthetic negatives is unchanged; only their
-    difficulty varies.
-    """
-    u = _stable_uniform(np.asarray(row_ids, dtype=str), seed + _LEVEL_SALT)
-    idx = np.minimum((u * len(levels)).astype(int), len(levels) - 1)
-    return np.asarray(levels, dtype=float)[idx]
-
-
-def add_shuffle_levels(
-    split_dir: str | Path,
-    fracs: tuple[float, ...] = (0.2, 0.4, 0.6, 0.8),
-    matrices_dir: str | Path | None = None,
-    shuffle_seeds: tuple[int, ...] | None = None,
-) -> dict:
-    """Write partially shuffled synthetic rows into an existing split.
-
-    Uses exactly the construction of the fully shuffled rows in
-    :func:`build_split` with ``shuffle_within="context"``: each context's rows
-    are shuffled together, before the split, and every synthetic row goes to
-    the partition of the label it carries. A fraction ``f`` permutes a random
-    ``f`` of the gene columns (chosen per context) across rows; the other
-    columns keep the row's own values. Real rows, test pairs and the gene list
-    are untouched. Returns the updated manifest.
-    """
-    from ..de.shards import context_seed
-    import pyarrow.parquet as pq
-    from .augment import shuffle_matrix
-
-    split_dir = Path(split_dir)
-    manifest = json.loads((split_dir / "manifest.json").read_text())
-    if not str(manifest.get("shuffled_within", "")).startswith("context"):
-        raise ValueError("graded levels are defined for context-wide shuffling only")
-    matrices_dir = Path(matrices_dir or manifest["source_matrices"])
-    seeds = tuple(shuffle_seeds or manifest.get("shuffle_seeds", [0]))
-    genes = [str(g) for g in load_gene_list(split_dir / "gene_list.tsv")]
-    held = {f"{p}|{c}" for p, c in pd.read_csv(split_dir / "test_pairs.tsv", sep="\t")
-            .astype(str).itertuples(index=False)}
-    # pairs build_split dropped (e.g. too few cells) are not in the split
-    dropped_path = split_dir / "dropped_pairs.tsv"
-    dropped = (set(pd.read_csv(dropped_path, sep="\t").pair.astype(str))
-               if dropped_path.exists() else set())
-    for n in manifest["contexts"]:
-        m = pd.read_csv(matrices_dir / f"{n}_row_metadata.csv")
-        table = pq.read_table(matrices_dir / f"{n}_PosteriorMean.parquet",
-                              columns=["label"] + genes).to_pandas()
-        if not (table.label.to_numpy() == m.label.to_numpy()).all():
-            raise ValueError(f"{n}: matrix and metadata row order disagree")
-        if dropped:
-            kept = ~_pair_key(m).isin(dropped).to_numpy()
-            m, table = m[kept].reset_index(drop=True), table[kept].reset_index(drop=True)
-        in_test = _pair_key(m).isin(held).to_numpy()
-        values = table[genes].to_numpy(dtype=np.float32)
-        for k in seeds:
-            for f in fracs:
-                fake_all = shuffle_matrix(values, seed=context_seed(f"{n}|frac{f:g}", k), frac=f)
-                for part, mask in (("trainval", ~in_test), ("test", in_test)):
-                    rows = np.nonzero(mask)[0]
-                    saved = pd.read_csv(split_dir / part / f"{n}_row_metadata.csv",
-                                        usecols=["label"])
-                    if not (saved.label.to_numpy() == table.label.to_numpy()[rows]).all():
-                        raise ValueError(f"{part}/{n}: split rows do not match the matrix")
-                    fake = pd.DataFrame(fake_all[rows], columns=genes)
-                    fake.insert(0, "label", table.label.to_numpy()[rows])
-                    _write_atomic_parquet(fake, split_dir / part / _shuffled_file(n, f, k))
-        print(f"[levels] {n}: {', '.join(f'{f:g}' for f in fracs)}", flush=True)
-        del table, values
-    manifest["shuffle_levels"] = sorted(set(manifest.get("shuffle_levels", [1.0])) | set(fracs))
-    (split_dir / "manifest.json").write_text(json.dumps(manifest, indent=2))
-    return manifest
-
-
 # ---- building and loading ---------------------------------------------------
 
 
@@ -318,9 +191,7 @@ def build_split(
     split_seed: int = 0,
     min_affected: int = 151,
     threshold: float = float(np.log(1.2)),
-    shuffle_seeds: tuple[int, ...] = (0,),
     contexts: list[str] | None = None,
-    shuffle_within: str = "context",
     keep_perturbed_genes: bool = False,
     control_label: str = "non-targeting",
     gene_list=None,
@@ -334,16 +205,11 @@ def build_split(
 
     Two passes over the matrices: the first counts affected genes on train/val
     full-data rows, the second writes each context's rows, gene-filtered, into
-    its partition. Synthetic rows are shuffled over the whole context
-    (``shuffle_within="context"``) or inside each partition (``"partition"``);
-    see the module docstring.
+    its partition.
 
     Refuses to write into a directory that already holds a manifest: a split
     is fixed once made, and every fit that used it depends on that.
     """
-    if shuffle_within not in ("context", "partition"):
-        raise ValueError(f"shuffle_within must be 'context' or 'partition', got {shuffle_within!r}")
-    from ..de.shards import context_seed
     from .gene_filter import affected_counts
     import pyarrow.parquet as pq
 
@@ -450,33 +316,15 @@ def build_split(
         if not (table.label.to_numpy() == m.label.to_numpy()).all():
             raise ValueError(f"{n}: matrix and metadata row order disagree")
         in_test = _pair_key(m).isin(held).to_numpy()
-        if shuffle_within == "context":
-            # one shuffle over every row of the context, BEFORE the split;
-            # each partition then takes the synthetic twins of its own rows
-            all_values = table[genes].to_numpy(dtype=np.float32)
-            fakes_all = {k: shuffle_matrix(all_values, seed=context_seed(n, k))
-                         for k in shuffle_seeds}
-            del all_values
         for part, mask in (("trainval", ~in_test), ("test", in_test)):
             rows = np.nonzero(mask)[0]
             block = table.iloc[rows].reset_index(drop=True)
             _write_atomic_parquet(block, out_dir / part / f"{n}_real.parquet")
             m.iloc[rows].assign(partition=part).to_csv(
                 out_dir / part / f"{n}_row_metadata.csv", index=False)
-            values = block[genes].to_numpy(dtype=np.float32)
-            for k in shuffle_seeds:
-                fake = pd.DataFrame(
-                    fakes_all[k][rows] if shuffle_within == "context"
-                    else shuffle_matrix(values, seed=context_seed(f"{n}|{part}", k)),
-                    columns=genes,
-                )
-                fake.insert(0, "label", block.label.to_numpy())
-                _write_atomic_parquet(fake, out_dir / part / f"{n}_shuffled_seed{k}.parquet")
             per_context.append({"context": n, "partition": part, "rows": len(rows),
                                 "pairs": int(_pair_key(m.iloc[rows]).nunique())})
-            del block, values
-        if shuffle_within == "context":
-            del fakes_all
+            del block
         print(f"[write] {n}: {int((~in_test).sum()):,} trainval / "
               f"{int(in_test.sum()):,} test rows", flush=True)
         del table
@@ -494,9 +342,6 @@ def build_split(
                         "n_genes": len(genes), "n_genes_before": len(genes_all),
                         "n_passing_filter": n_filter,
                         "keep_perturbed_genes": keep_perturbed_genes},
-        "shuffle_seeds": list(shuffle_seeds),
-        "shuffled_within": ("context, before the split" if shuffle_within == "context"
-                            else "partition x context"),
         "contexts": names,
         "partitions": {
             part: {"rows": int(pc[pc.partition == part].rows.sum()),
@@ -513,19 +358,10 @@ def load_partition(
     split_dir: str | Path,
     partition: str,
     contexts: list[str] | None = None,
-    shuffled: bool = True,
-    shuffle_seed: int = 0,
-    shuffle_levels: tuple[float, ...] | None = None,
 ) -> tuple[np.ndarray, pd.DataFrame, np.ndarray]:
-    """``(X, meta, genes)`` for one partition, measured rows first.
-
-    ``meta`` carries ``is_real``; with ``shuffled=True`` the synthetic rows
-    follow the measured ones, one per measured row, with the same label, and
-    ``meta.shuffle_frac`` says what fraction of their genes was shuffled.
-    ``shuffle_levels=None`` loads the fully shuffled rows only; a tuple such as
-    :data:`SHUFFLE_LEVELS` takes each measured row's twin from the level
-    :func:`assign_shuffle_levels` gives it.
-    """
+    """``(X, meta, genes)`` for one partition: the measured rows of every
+    context, in file order. (Older splits may also hold gene-shuffled copies of
+    the rows; they are not read.)"""
     if partition not in PARTITIONS:
         raise ValueError(f"partition must be one of {PARTITIONS}, got {partition!r}")
     split_dir = Path(split_dir)
@@ -539,7 +375,7 @@ def load_partition(
     genes = np.asarray(load_gene_list(split_dir / "gene_list.tsv"))
     cols = [str(g) for g in genes]
 
-    real_x, real_m, fake_x, fake_m = [], [], [], []
+    real_x, real_m = [], []
     for n in names:
         d = split_dir / partition
         m = pd.read_csv(d / f"{n}_row_metadata.csv")
@@ -547,24 +383,241 @@ def load_partition(
         if not (block.label.to_numpy() == m.label.to_numpy()).all():
             raise ValueError(f"{partition}/{n}: matrix and metadata disagree")
         real_x.append(block[cols].to_numpy(dtype=np.float32))
-        real_m.append(m.assign(is_real=True))
-        if shuffled:
-            levels = tuple(shuffle_levels) if shuffle_levels else (1.0,)
-            lev = (assign_shuffle_levels(m.row_id, levels, shuffle_seed)
-                   if len(levels) > 1 else np.full(len(m), levels[0]))
-            fx = np.empty((len(m), len(cols)), dtype=np.float32)
-            for f in levels:
-                fb = pd.read_parquet(d / _shuffled_file(n, f, shuffle_seed))
-                if not (fb.label.to_numpy() == m.label.to_numpy()).all():
-                    raise ValueError(f"{partition}/{n}: shuffled rows out of order")
-                at = lev == f
-                fx[at] = fb.loc[at, cols].to_numpy(dtype=np.float32)
-                del fb
-            fake_x.append(fx)
-            fake_m.append(m.assign(is_real=False, shuffle_frac=lev,
-                                   row_id=m.row_id + "|shuffled"))
+        real_m.append(m)
         del block
 
-    X = np.vstack(real_x + fake_x)
-    meta = pd.concat(real_m + fake_m, ignore_index=True)
+    X = np.vstack(real_x)
+    meta = pd.concat(real_m, ignore_index=True)
     return X, meta, genes
+
+
+# ---- pair-level splits of an in-memory table (used by tests and small fits) ----
+
+@dataclass
+class Split:
+    """Boolean masks over rows, plus what was held out.
+
+    ``val`` is ``None`` for a two-way split. Prefer three ways: the validation
+    half is what you are allowed to look at repeatedly -- early stopping,
+    ``alpha``, ``d`` -- and the test half is what you look at once, at the end.
+    Choosing the stopping epoch on the test half turns it into a validation set
+    and the number reported from it is no longer held out.
+    """
+
+    train: np.ndarray
+    test: np.ndarray
+    level: str
+    held_out: list
+    val: np.ndarray | None = None
+    held_out_val: list = field(default_factory=list)
+
+    @property
+    def three_way(self) -> bool:
+        return self.val is not None
+
+    def summary(self, meta: pd.DataFrame) -> dict:
+        out = {
+            "level": self.level,
+            "train_rows": int(self.train.sum()),
+            "test_rows": int(self.test.sum()),
+            "held_out": len(self.held_out),
+            "train_perts": int(meta[self.train].perturbation.nunique()),
+            "test_perts": int(meta[self.test].perturbation.nunique()),
+            "train_contexts": int(meta[self.train].context.nunique()),
+            "test_contexts": int(meta[self.test].context.nunique()),
+        }
+        if self.val is not None:
+            out.update(
+                val_rows=int(self.val.sum()),
+                held_out_val=len(self.held_out_val),
+                val_perts=int(meta[self.val].perturbation.nunique()),
+                val_contexts=int(meta[self.val].context.nunique()),
+            )
+        return out
+
+
+def make_split(
+    meta: pd.DataFrame,
+    level: str = "pair",
+    test_frac: float = 0.1,
+    seed: int = 0,
+    held_out_contexts: list[str] | None = None,
+    val_frac: float = 0.0,
+    protect_single_context: bool = True,
+) -> Split:
+    """Leak-free split at the requested granularity.
+
+    ``level``
+        ``"pair"`` holds out ``(perturbation, context)`` combinations -- both
+        sides seen elsewhere, so the model must supply the interaction.
+        ``"perturbation"`` holds out whole perturbations across every context.
+        ``"context"`` holds out whole contexts (pass ``held_out_contexts``).
+
+    ``val_frac``
+        Non-zero makes it a three-way split, drawing the validation units
+        disjointly from the test units. Use validation for early stopping and
+        hyperparameters and keep test for a single final read; otherwise the
+        stopping epoch is chosen on the test set and its numbers are no longer
+        held out.
+
+    ``protect_single_context``
+        At ``level="pair"``, keep every pair of a perturbation observed in only
+        ONE context out of the holdout draw, so it always trains. Such a
+        perturbation has a single pair; if that pair is held out, ``e_p`` is
+        never trained and the row is unpredictable by construction -- a noise
+        floor on the held-out score rather than a test of anything. On the
+        12-context screen this affected 3 perturbations at seed 0. Fractions
+        stay relative to *all* pairs, so the held-out count is unchanged; only
+        the pool drawn from shrinks.
+
+    In every case all 11 samples of an affected ``(perturbation, context)`` move
+    together, which is checked before returning.
+    """
+    rng = np.random.default_rng(seed)
+    pert = meta.perturbation.to_numpy().astype(str)
+    ctx = meta.context.to_numpy().astype(str)
+    val = held_val = None
+
+    if level == "pair":
+        pairs = pd.MultiIndex.from_arrays([pert, ctx])
+        unique = pairs.unique()
+        n_test = max(1, int(round(test_frac * len(unique))))
+        n_val = max(1, int(round(val_frac * len(unique)))) if val_frac else 0
+        if n_test + n_val > len(unique):
+            raise ValueError(
+                f"test_frac + val_frac would hold out {n_test + n_val} of "
+                f"{len(unique)} pairs"
+            )
+
+        eligible = np.arange(len(unique))
+        if protect_single_context:
+            # A perturbation with one pair has nothing left to train e_p on if
+            # that pair is held out. Keep those pairs in train.
+            n_by_pert = pd.Series(unique.get_level_values(0)).value_counts()
+            singles = set(n_by_pert.index[n_by_pert == 1])
+            if singles:
+                keep_in_train = np.array(
+                    [p in singles for p in unique.get_level_values(0)]
+                )
+                eligible = np.nonzero(~keep_in_train)[0]
+                if n_test + n_val > len(eligible):
+                    raise ValueError(
+                        f"after protecting {len(singles)} single-context "
+                        f"perturbations only {len(eligible)} pairs remain "
+                        f"drawable, need {n_test + n_val}"
+                    )
+        drawn = eligible[rng.choice(len(eligible), n_test + n_val, replace=False)]
+        chosen = set(unique[drawn[:n_test]])
+        test = np.array([pc in chosen for pc in pairs])
+        held = sorted(chosen)
+        if n_val:
+            chosen_val = set(unique[drawn[n_test:]])
+            val = np.array([pc in chosen_val for pc in pairs])
+            held_val = sorted(chosen_val)
+    elif level == "perturbation":
+        unique = np.unique(pert)
+        n_test = max(1, int(round(test_frac * len(unique))))
+        n_val = max(1, int(round(val_frac * len(unique)))) if val_frac else 0
+        if n_test + n_val > len(unique):
+            raise ValueError(
+                f"test_frac + val_frac would hold out {n_test + n_val} of "
+                f"{len(unique)} perturbations"
+            )
+        drawn = rng.choice(unique, n_test + n_val, replace=False)
+        chosen = set(drawn[:n_test])
+        test = np.isin(pert, list(chosen))
+        held = sorted(chosen)
+        if n_val:
+            chosen_val = set(drawn[n_test:])
+            val = np.isin(pert, list(chosen_val))
+            held_val = sorted(chosen_val)
+    elif level == "context":
+        if not held_out_contexts:
+            raise ValueError("level='context' needs held_out_contexts")
+        missing = set(held_out_contexts) - set(np.unique(ctx))
+        if missing:
+            raise ValueError(f"context(s) not present: {sorted(missing)}")
+        test = np.isin(ctx, held_out_contexts)
+        held = sorted(held_out_contexts)
+        if val_frac:
+            raise ValueError(
+                "level='context' does not draw a validation set; name the "
+                "validation contexts explicitly with a second call"
+            )
+    else:
+        raise ValueError(f"level must be pair, perturbation or context, got {level!r}")
+
+    train = ~test if val is None else ~(test | val)
+    split = Split(
+        train=train, test=test, level=level, held_out=held,
+        val=val, held_out_val=held_val or [],
+    )
+    _assert_no_pair_leak(meta, split)
+    return split
+
+
+def _assert_no_pair_leak(meta: pd.DataFrame, split: Split) -> None:
+    """No (perturbation, context) may appear in more than one half."""
+    key = meta.perturbation.astype(str) + "|" + meta.context.astype(str)
+    halves = {"train": set(key[split.train]), "test": set(key[split.test])}
+    if split.val is not None:
+        halves["val"] = set(key[split.val])
+
+    names = list(halves)
+    for i, a in enumerate(names):
+        for b in names[i + 1 :]:
+            both = halves[a] & halves[b]
+            if both:
+                raise AssertionError(
+                    f"{len(both)} (perturbation, context) pairs appear in BOTH "
+                    f"{a} and {b}, e.g. {sorted(both)[:3]} -- a sample-level leak"
+                )
+
+    covered = sum(m.sum() for m in
+                  [split.train, split.test] + ([split.val] if split.val is not None else []))
+    if int(covered) != len(meta):
+        raise AssertionError(
+            f"the halves cover {covered} rows but meta has {len(meta)}"
+        )
+
+
+def apply_split(split: Split, meta: pd.DataFrame) -> Split:
+    """Re-derive a split's masks for a different row set.
+
+    A synthetic row inherits the ``(perturbation, context)`` of the real row it
+    was generated from, so it must land in the **same half** as that pair. If it
+    does not, a held-out pair's synthetic twin appears in training and the
+    held-out numbers stop meaning anything -- the same class of leak as a
+    negative that names a held-out pair, and one :func:`make_split` cannot
+    catch, because it splits on ``(perturbation, context)`` and knows nothing
+    about ``is_real``.
+
+    Rather than re-drawing (which would put the twins in different halves),
+    this re-applies the *units* the original split held out.
+    """
+    pert = meta.perturbation.astype(str).to_numpy()
+    ctx = meta.context.astype(str).to_numpy()
+    val = None
+
+    if split.level == "pair":
+        held = {(str(a), str(b)) for a, b in split.held_out}
+        held_v = {(str(a), str(b)) for a, b in split.held_out_val}
+        key = list(zip(pert, ctx))
+        test = np.array([k in held for k in key])
+        if held_v:
+            val = np.array([k in held_v for k in key])
+    elif split.level == "perturbation":
+        test = np.isin(pert, [str(x) for x in split.held_out])
+        if split.held_out_val:
+            val = np.isin(pert, [str(x) for x in split.held_out_val])
+    elif split.level == "context":
+        test = np.isin(ctx, [str(x) for x in split.held_out])
+    else:  # pragma: no cover - make_split validates this
+        raise ValueError(f"unknown split level {split.level!r}")
+
+    train = ~test if val is None else ~(test | val)
+    out = Split(train=train, test=test, level=split.level,
+                held_out=split.held_out, val=val,
+                held_out_val=split.held_out_val)
+    _assert_no_pair_leak(meta, out)
+    return out

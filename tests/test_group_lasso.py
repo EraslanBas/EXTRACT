@@ -92,15 +92,11 @@ def _toy(n_p=12, n_c=3, rows=4, d=4, G=40, seed=0):
 @pytest.mark.parametrize("subspace", ["fixed", "free"])
 def test_fit_and_evaluate_with_the_group_lasso(subspace):
     X, p, c = _toy()
-    is_real = np.ones(len(X), bool)
-    Xs = X.copy(); np.random.default_rng(1).shuffle(Xs, axis=1)
-    X2, p2, c2 = np.r_[X, Xs], np.r_[p, p], np.r_[c, c]
-    is_real = np.r_[is_real, np.zeros(len(X), bool)]
-    val = np.zeros(len(X2), bool); val[::5] = True
-    cfg = TrainConfig(pert_embedding_init="random", n_factors=4, epochs=6, batch_size=50, log_every=0, seed=0, head="distance",
+    val = np.zeros(len(X), bool); val[::5] = True
+    cfg = TrainConfig(pert_embedding_init="random", n_factors=4, epochs=6, batch_size=40, log_every=0, seed=0,
                       subspace=subspace, axes_init="random", noise_rank=2, eval_every=3,
                       coding="group_lasso", lasso_lambda=0.05, lasso_steps=10)
-    model, history = fit(X2, p2, c2, config=cfg, train_rows=~val, val_rows=val, is_real=is_real)
+    model, history = fit(X, p, c, config=cfg, train_rows=~val, val_rows=val)
     assert np.allclose(model.loadings.B.detach().norm(dim=1).cpu().numpy(), 1.0, atol=1e-5)
     assert all(h["lasso_penalty"] > 0 and 0 < h["programs_per_pair"] <= 4 for h in history)
     val_rec = [h for h in history if "val_programs_per_pair" in h or "val_lasso_objective" in h]

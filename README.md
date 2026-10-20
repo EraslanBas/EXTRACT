@@ -105,9 +105,9 @@ python scripts/sweep_grid.py --subspace fixed free ...   # both, as a grid dimen
 ```
 src/extract/      the method
     de/                 shrunken-logFC pipeline (Welch + ashr), per context
-    data/               gene filter, on-target mask, leak-free splits, synthetic rows
+    data/               gene filter, on-target mask, leak-free splits, the subspace V
     models/             global loadings B, per-component head, label network
-    objectives/         contrastive discrimination, precision-weighted reconstruction
+    objectives/         label-swap discrimination, masked reconstruction
     interpret/          loadings, sign anchoring, effect decomposition, enrichment export
     evaluation/         span test, cross-seed stability, held-out evaluation
     train.py            training loop and evaluation
@@ -134,7 +134,7 @@ Building logFC matrices from single-cell data additionally needs R with `ashr`.
 
 The repository holds code only. Data artifacts (matrices, splits, sweep
 outputs) live under `$EXTRACT_ROOT`; resolve paths with
-`extract.paths`. See [`docs/data_layout.md`](docs/data_layout.md).
+`extract.paths`.
 
 ## Documentation
 

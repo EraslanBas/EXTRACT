@@ -153,20 +153,6 @@ class GlobalLoadings(nn.Module):
         difference against within-context controls, so zero is the reference."""
         return z @ self.B
 
-    # ---- optional noise metric ------------------------------------------
-
-    def set_noise_metric(self, U: np.ndarray, s: np.ndarray, c: float) -> None:
-        """Measure reconstruction error in ``M~ = I + U diag(s/c) U^T``.
-
-        The noise metric ``M = c I + U diag(s) U^T`` rescaled so directions with
-        no correlated noise keep weight 1 (so ``alpha`` keeps its meaning), and
-        each shared-noise direction ``u_k`` is down-weighted by ``c / (c + s_k)``.
-        No gene's own scale changes.
-        """
-        self.register_buffer("metric_U", torch.as_tensor(U, dtype=torch.float32))
-        self.register_buffer("metric_w", torch.as_tensor(
-            np.asarray(s) / (float(c) + np.asarray(s)), dtype=torch.float32))
-
     def squared_error(
         self,
         x: torch.Tensor,
@@ -176,25 +162,9 @@ class GlobalLoadings(nn.Module):
         """Per-row ``|| m * (x - z B) ||^2 / n_retained`` -- [batch].
 
         Divided by the number of retained genes so the scale does not depend on
-        ``G`` or on whether a row masks anything. With a noise metric set
-        (:meth:`set_noise_metric`) the squared norm is ``r M~^{-1} r^T`` of the
-        masked residual instead.
+        ``G`` or on whether a row masks anything.
         """
         resid = x - self.reconstruct(z)
-        if getattr(self, "metric_U", None) is not None:
-            r = resid
-            if target_col is not None:
-                masked = target_col != NO_MASK
-                if masked.any():
-                    rows = torch.nonzero(masked, as_tuple=True)[0]
-                    r = resid.clone()
-                    r[rows, target_col[rows]] = 0.0
-            proj = r @ self.metric_U
-            sq = r.pow(2).sum(1) - (proj.pow(2) * self.metric_w).sum(1)
-            n_kept = torch.full_like(sq, float(self.n_genes))
-            if target_col is not None:
-                n_kept = n_kept - (target_col != NO_MASK).to(sq.dtype)
-            return sq / n_kept
         sq = resid.pow(2).sum(dim=1)
         n_kept = torch.full_like(sq, float(self.n_genes))
         if target_col is not None:
@@ -265,29 +235,24 @@ def collinearity_hinge(B: torch.Tensor, tau: float) -> torch.Tensor:
     return (torch.relu(C[iu[0], iu[1]] - tau) ** 2).sum()
 
 
-def gene_prior(B: torch.Tensor, kind: str, k: int = 200) -> torch.Tensor:
-    """The gene-side penalty summed over programs: ``"topk"``: sum_k (1 - share
-    in the top k genes); ``"l1"``: sum_k l1_sparseness."""
-    if kind == "topk":
-        return (1.0 - gene_concentration(B, k)).sum()
-    if kind == "l1":
-        return l1_sparseness(B).sum()
-    raise ValueError(f"gene_prior must be 'topk' or 'l1', got {kind!r}")
+def gene_prior(B: torch.Tensor) -> torch.Tensor:
+    """The gene-side penalty: sum_k l1_sparseness(b_k), heavy-tailed loadings."""
+    return l1_sparseness(B).sum()
 
 
-def initial_axes(d: int, axes_init: str = "identity", seed: int = 0) -> torch.Tensor:
-    """Starting ``A`` [d, d] for ``B = A V``: the identity, or a random rotation
-    drawn from ``seed`` (different for every seed, so that cross-seed agreement
-    cannot come from a shared starting point)."""
-    if axes_init == "identity" or axes_init == "jd":
-        # "jd": the axes are computed from the data (extract.train.jd_axes) and
-        # passed in; the identity is only a placeholder that load_state_dict
-        # overwrites when a saved model is rebuilt
+def initial_axes(d: int, axes_init: str = "jd", seed: int = 0) -> torch.Tensor:
+    """Starting ``A`` [d, d] for ``B = A V``: a random rotation drawn from
+    ``seed`` (different for every seed, so that cross-seed agreement cannot come
+    from a shared starting point), or -- for ``"jd"``, whose axes are computed
+    from the data (:func:`extract.train.jd_axes`) and passed in -- the identity
+    as a placeholder that ``load_state_dict`` overwrites when a saved model is
+    rebuilt."""
+    if axes_init == "jd":
         return torch.eye(d)
     if axes_init == "random":
         Q, _ = np.linalg.qr(np.random.default_rng(seed).normal(size=(d, d)))
         return torch.as_tensor(Q, dtype=torch.float32)
-    raise ValueError(f"axes_init must be 'identity' or 'random', got {axes_init!r}")
+    raise ValueError(f"axes_init must be 'jd' or 'random', got {axes_init!r}")
 
 
 class FixedBasisLoadings(GlobalLoadings):
@@ -300,8 +265,8 @@ class FixedBasisLoadings(GlobalLoadings):
     Every method of :class:`GlobalLoadings` works unchanged through ``B``.
     """
 
-    def __init__(self, V: np.ndarray, ridge: float = 1e-4, learn_axes: bool = True,
-                 axes_init: str = "identity", seed: int = 0, A0: torch.Tensor | None = None):
+    def __init__(self, V: np.ndarray, ridge: float = 1e-4,
+                 axes_init: str = "jd", seed: int = 0, A0: torch.Tensor | None = None):
         nn.Module.__init__(self)
         V = torch.as_tensor(np.asarray(V), dtype=torch.float32)
         self.n_factors, self.n_genes = V.shape
@@ -309,17 +274,11 @@ class FixedBasisLoadings(GlobalLoadings):
         self.register_buffer("V", V)
         if A0 is None:
             A0 = initial_axes(self.n_factors, axes_init, seed)
-        if learn_axes:
-            self.A = nn.Parameter(A0)
-        else:                     # "frozen": B = V exactly, a probe of V's axes
-            self.register_buffer("A", torch.eye(self.n_factors))
+        self.A = nn.Parameter(A0)
 
     @torch.no_grad()
     def renormalize_rows_(self) -> None:
-        """Unit-length rows of ``B = A V``, by rescaling the rows of ``A``.
-        Nothing to do in the frozen mode (B = V, no axes are learned)."""
-        if not isinstance(self.A, nn.Parameter):
-            return
+        """Unit-length rows of ``B = A V``, by rescaling the rows of ``A``."""
         self.A.div_((self.A @ self.V).norm(dim=1, keepdim=True).clamp_min(1e-12))
 
     @property

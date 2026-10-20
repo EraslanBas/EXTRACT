@@ -36,9 +36,8 @@ def test_penalty_raises_gene_concentration_in_fit():
     X, p, c = _data()
     shares = {}
     for g in (0.0, 5.0):
-        cfg = TrainConfig(pert_embedding_init="random", n_factors=3, epochs=40, batch_size=64, log_every=0, seed=0, head="statistics",
-                          subspace="fixed", subspace_method="pca", axes_init="random", noise_rank=2,
-                          gene_sparsity=g, gene_topk=8, lr=1e-2)
+        cfg = TrainConfig(pert_embedding_init="random", n_factors=3, epochs=40, batch_size=64, log_every=0, seed=0, subspace="fixed", subspace_method="pca", axes_init="random", noise_rank=2,
+                          gene_sparsity=g, lr=1e-2)
         model, hist = fit(X, p, c, config=cfg)
         shares[g] = float(gene_concentration(model.loadings.B.detach(), 8).mean())
         assert "gene_top_share" in hist[-1]
@@ -48,18 +47,18 @@ def test_penalty_raises_gene_concentration_in_fit():
 def test_val_total_is_the_training_objective_term_by_term():
     X, p, c = _data()
     val = np.zeros(len(X), bool); val[::5] = True
-    cfg = TrainConfig(pert_embedding_init="random", n_factors=3, epochs=3, batch_size=64, log_every=0, seed=0, head="statistics",
-                      head_normaliser=True, subspace="fixed", subspace_method="pca", axes_init="random",
+    cfg = TrainConfig(pert_embedding_init="random", n_factors=3, epochs=3, batch_size=64, log_every=0, seed=0, subspace="fixed", subspace_method="pca", axes_init="random",
                       noise_rank=2, eval_every=1, coding="group_lasso", lasso_lambda=0.05, lasso_steps=10,
-                      gene_sparsity=0.5, gene_topk=8, select_on="auc")
+                      gene_sparsity=0.5)
     _, hist = fit(X, p, c, config=cfg, train_rows=~val, val_rows=val)
     h = hist[-1]
     # no synthetic rows: the objective's terms reduce to the plain validation terms
     assert np.isclose(h["val_disc_objective"], h["val_disc"])
-    assert np.isclose(h["val_recon_objective"], h["val_lasso_objective"])
-    expect = h["val_disc_objective"] + cfg.alpha * h["val_recon_objective"] + 0.5 * h["val_gene_penalty"]
+    expect = (h["val_disc_objective"] + cfg.alpha * h["val_lasso_objective"] + 0.5 * h["val_gene_penalty"]
+              + cfg.distinct_weight * h["val_distinct_penalty"])
     assert np.isclose(h["val_total"], expect)
-    assert np.isclose(h["total"], h["disc"] + cfg.alpha * h["recon"] + 0.5 * h["gene_penalty"])
+    assert np.isclose(h["total"], h["disc"] + cfg.alpha * h["recon"] + 0.5 * h["gene_penalty"]
+                      + cfg.distinct_weight * h["distinct_penalty"])
 
 
 def test_l1_sparseness_and_collinearity_hinge():
@@ -75,9 +74,8 @@ def test_hinge_stops_programs_collapsing_under_the_prior():
     X, p, c = _data()
     maxcos = {}
     for mu in (0.0, 100.0):
-        cfg = TrainConfig(n_factors=3, epochs=40, batch_size=64, log_every=0, seed=0, head="statistics",
-                          subspace="fixed", subspace_method="pca", axes_init="random", noise_rank=2,
-                          gene_sparsity=5.0, gene_prior="l1", distinct_weight=mu, distinct_tau=0.5, lr=1e-2,
+        cfg = TrainConfig(n_factors=3, epochs=40, batch_size=64, log_every=0, seed=0, subspace="fixed", subspace_method="pca", axes_init="random", noise_rank=2,
+                          gene_sparsity=5.0, distinct_weight=mu, distinct_tau=0.5, lr=1e-2,
                           pert_embedding_init="random")
         model, hist = fit(X, p, c, config=cfg)
         Bu = model.loadings.B.detach(); Bu = Bu / Bu.norm(dim=1, keepdim=True)

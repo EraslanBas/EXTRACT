@@ -171,12 +171,13 @@ def cross_seed(Bs):
 # ---------------------------------------------------------------- fitting
 
 def run_fit(a, X, pi, ci, st, nc, tr, va, seed, **kw):
-    cfg = TrainConfig(n_factors=a.programs, epochs=a.epochs, eval_every=a.eval_every, patience=0,
-                      select_on="accuracy", seed=seed, log_every=0, noise_rank=a.noise_rank,
-                      head=a.head, sparsity=a.sparsity, **kw)
+    # simulated perturbations have no target genes: random embedding starts
+    cfg = TrainConfig(n_factors=a.programs, epochs=a.epochs, eval_every=a.eval_every,
+                      seed=seed, log_every=0, noise_rank=a.noise_rank,
+                      pert_embedding_init="random", **kw)
     with contextlib.redirect_stdout(io.StringIO()):
         model, hist = fit(X, pi, ci, config=cfg, train_rows=tr, val_rows=va)
-    best = max((h for h in hist if "val_accuracy" in h), key=lambda h: h["val_accuracy"])
+    best = max((h for h in hist if "val_auc" in h), key=lambda h: h["val_auc"])
     return model, best
 
 
@@ -185,7 +186,7 @@ def summarise(Bt, fits):
     return {"mcc": [round(mcc(Bt, b), 3) for b in Bs],
             "overlap": [round(subspace_overlap(Bt, b), 3) for b in Bs],
             "cross_seed": None if len(Bs) < 2 else round(cross_seed(Bs), 3),
-            "val_acc": [round(h["val_accuracy"], 3) for _, h in fits],
+            "val_auc": [round(h["val_auc"], 3) for _, h in fits],
             "selected_epoch": [int(h["epoch"]) for _, h in fits]}
 
 
@@ -214,11 +215,6 @@ def run_condition(family, structure, a):
     fixed_r = [run_fit(a, X, pi, ci, st, nc, tr, va, s, subspace="fixed", axes_init="random")
                for s in a.seeds]
     res["extract_fixed_Arandom"] = summarise(B, fixed_r)
-    for lm in a.label_models:
-        for init in ("identity", "random"):
-            res[f"extract_fixed_{lm}{'_Arandom' if init == 'random' else ''}"] = summarise(
-                B, [run_fit(a, X, pi, ci, st, nc, tr, va, s, subspace="fixed", axes_init=init,
-                            label_model=lm) for s in a.seeds])
     V = fixed[0][0].subspace_basis_
     res["V_frozen_axes"] = {"mcc": round(mcc(B, V), 3), "overlap": round(subspace_overlap(B, V), 3)}
     ms = float(np.mean(X[tr] ** 2))
@@ -240,7 +236,7 @@ def show(r):
     for k, v in r.items():
         if k.startswith("extract_"):
             print(f"  {k:<22} {str(v['mcc']):<24} {np.mean(v['overlap']):<10.3f} "
-                  f"{str(v['cross_seed']):<10} {v['val_acc']}")
+                  f"{str(v['cross_seed']):<10} {v['val_auc']}")
     print(f"  random-rotation null  {r['random_rotation_null']}")
     sys.stdout.flush()
 
@@ -272,15 +268,6 @@ def main():
     ap.add_argument("--epochs", type=int, default=150)
     ap.add_argument("--free", action=argparse.BooleanOptionalAction, default=True,
                     help="also fit the free model")
-    ap.add_argument("--label-models", nargs="*", default=[], choices=["product", "ammi"],
-                    help="also fit fixed mode with these structured label models "
-                         "(identity and random A)")
-    ap.add_argument("--product", dest="label_models", action="store_const", const=["product"],
-                    help="shorthand for --label-models product")
-    ap.add_argument("--head", default="statistics", choices=["statistics", "distance"],
-                    help="discriminator head for every EXTRACT fit")
-    ap.add_argument("--sparsity", type=float, default=0.0,
-                    help="weight of the activity-sparsity penalty for every EXTRACT fit")
     ap.add_argument("--interaction", type=float, default=1.0,
                     help="ammi structure: scale of the interaction f_p * h_c")
     ap.add_argument("--eval-every", type=int, default=5)
@@ -304,12 +291,6 @@ def main():
     tag = f"{a.noise}_amp{a.amp:g}_active{a.active_frac:g}_corr{a.program_corr:g}_{'-'.join(a.families)}"
     if a.structures != ["additive", "multiplicative"]:
         tag += f"_{'-'.join(a.structures)}" + (f"_int{a.interaction:g}" if "ammi" in a.structures else "")
-    if a.label_models:
-        tag += f"_lm-{'-'.join(a.label_models)}"
-    if a.head != "statistics":
-        tag += f"_head-{a.head}"
-    if a.sparsity:
-        tag += f"_sparse{a.sparsity:g}"
     (out / f"bench_{tag}.json").write_text(json.dumps({"settings": vars(a), "results": results}, indent=1))
     print(f"\nwrote {out / f'bench_{tag}.json'}")
 

@@ -9,13 +9,12 @@ import torch
 
 from extract.data.ontarget import mask_coverage, on_target_index
 from extract.evaluation import span_residual
-from extract.models import NO_MASK, DistanceHead, GlobalLoadings, PerComponentHead
-from extract.models.label_net import AMMILabelNet, FactorizedLabelNet, ProductLabelNet
+from extract.models import NO_MASK, GlobalLoadings, PerComponentHead
+from extract.models.label_net import FactorizedLabelNet
 from extract.objectives import (
     DEFAULT_WEIGHTS,
     StratifiedNegativeSampler,
     contrastive_loss,
-    precision_weights,
 )
 from extract.train import TrainConfig, fit
 
@@ -108,21 +107,6 @@ def test_squared_error_excludes_the_masked_entry():
         assert torch.allclose(err[i], expected, atol=1e-5), f"row {i}"
 
 
-def test_precision_weights_are_proportional_to_cells():
-    n = np.array([50.0, 100.0, 200.0, 400.0])
-    w = precision_weights(n, clip_quantile=1.0)
-    assert np.allclose(w / w[0], n / n[0])
-    assert np.isclose(w.mean(), 1.0)
-
-
-def test_precision_weights_reject_nonpositive_counts():
-    with pytest.raises(ValueError):
-        precision_weights(np.array([10.0, 0.0]))
-
-
-# --------------------------------------------------------------- eq. (6)/(7)
-
-
 def test_head_is_additively_separable():
     """Changing z_k must move the score only through psi_k -- no cross terms."""
     torch.manual_seed(6)
@@ -172,54 +156,6 @@ def test_label_net_shares_embeddings_rather_than_memorising_pairs():
     assert n_params < 100 * 8 * 10  # far below one row per observed pair
 
 
-def test_product_label_net_is_a_per_factor_product():
-    torch.manual_seed(0)
-    net = ProductLabelNet(6, 3, 5, 4)
-    with torch.no_grad():
-        net.f.weight.normal_(); net.g.weight.normal_()
-    p, c = torch.tensor([1, 1, 4, 4]), torch.tensor([0, 2, 0, 2])
-    lam = net(p, c)
-    assert lam.shape == (4, 5, 4)
-    # rank one in (p, c) for every factor and statistic
-    assert torch.allclose(lam[0] * lam[3], lam[1] * lam[2], atol=1e-5)
-
-
-def test_ammi_label_net_interaction_is_rank_one_after_removing_main_effects():
-    torch.manual_seed(0)
-    net = AMMILabelNet(7, 4, 3, 2)
-    with torch.no_grad():
-        for e in (net.a, net.b, net.f, net.g):
-            e.weight.normal_()
-    p, c = torch.meshgrid(torch.arange(7), torch.arange(4), indexing="ij")
-    lam = net(p.reshape(-1), c.reshape(-1)).view(7, 4, 3, 2)
-    T = lam[..., 0, 0]
-    T = T - T.mean(0, keepdim=True) - T.mean(1, keepdim=True) + T.mean()
-    s = torch.linalg.svdvals(T)
-    assert s[1] < 1e-4 * s[0]
-
-
-def test_distance_head_is_b_minus_the_scaled_squared_mismatch():
-    head = DistanceHead(3)
-    with torch.no_grad():
-        head.log_sigma.copy_(torch.log(torch.tensor([1.0, 2.0, 0.5])))
-        head.bias.fill_(1.5)
-    z = torch.tensor([[2.0, 0.1, -1.0]])
-    zhat = torch.tensor([[1.8, 0.0, -0.9]]).unsqueeze(-1)
-    e = (z - zhat[..., 0]) ** 2 / (2 * torch.tensor([1.0, 4.0, 0.25]))
-    assert torch.allclose(head(z, zhat), 1.5 - e.sum(1))
-    assert torch.allclose(head.evidence(z, zhat).sum(1) + head.bias, head(z, zhat))
-
-
-@pytest.mark.parametrize("label_model", ["mlp", "product", "ammi"])
-def test_fit_runs_with_the_distance_head(label_model):
-    X, p, c, s, n = _toy_dataset()
-    cfg = TrainConfig(pert_embedding_init="random", n_factors=5, epochs=6, batch_size=64, log_every=0, seed=0,
-                      label_model=label_model, head="distance", noise_rank=3)
-    model, history = fit(X, p, c, target_col=None, config=cfg)
-    assert isinstance(model.head, DistanceHead)
-    assert history[-1]["disc"] < history[0]["disc"]
-
-
 def test_label_net_takes_different_perturbation_and_context_sizes():
     net = FactorizedLabelNet(30, 4, 6, 1, embedding_dim=64, context_embedding_dim=16)
     assert net.perturbation_embedding.weight.shape == (30, 64)
@@ -243,8 +179,7 @@ def test_control_mean_embeddings_follow_the_context_order_and_scale():
 def test_fit_starts_contexts_at_a_given_embedding():
     X, p, c, s, n = _toy_dataset()
     init = np.random.default_rng(1).normal(size=(3, 8)).astype(np.float32) * 0.02
-    cfg = TrainConfig(pert_embedding_init="random", n_factors=5, epochs=0, batch_size=64, log_every=0, head="distance",
-                      noise_rank=3, context_embedding_dim=8)
+    cfg = TrainConfig(pert_embedding_init="random", n_factors=5, epochs=0, batch_size=64, log_every=0, noise_rank=3, context_embedding_dim=8)
     model, _ = fit(X, p, c, config=cfg, context_embedding_init=init)
     assert np.allclose(model.label_net.context_embedding.weight.detach().numpy(), init)
 
@@ -269,56 +204,12 @@ def test_response_embeddings_use_training_pairs_and_skip_own_knockdown():
     assert np.allclose(np.abs(E), np.abs(response_embeddings(X3, p, c, target, train, n_pert, dim=4)[0]), atol=1e-5)
 
 
-def test_label_variance_head_is_the_gaussian_log_likelihood():
-    head = DistanceHead(3, label_variance=True, tau=1.0)
-    with torch.no_grad():
-        head.log_sigma.copy_(torch.log(torch.tensor([1.0, 2.0, 0.5]))); head.bias.fill_(0.7)
-    z = torch.tensor([[2.0, 0.1, -1.0]])
-    lam = torch.tensor([[[1.8, 0.3], [0.0, -2.0], [-0.9, 0.0]]])
-    logvar = 2 * head.log_sigma + torch.tanh(lam[..., 1])
-    expect = 0.7 - ((z - lam[..., 0]) ** 2 / (2 * logvar.exp()) + 0.5 * logvar).sum(1)
-    assert torch.allclose(head(z, lam), expect)
-    with pytest.raises(ValueError):
-        head(z, lam[..., :1])
-
-
-def test_fit_runs_with_the_label_variance_head():
-    X, p, c, s, n = _toy_dataset()
-    cfg = TrainConfig(pert_embedding_init="random", n_factors=5, epochs=4, batch_size=64, log_every=0, seed=0, head="distance",
-                      head_variance="label", noise_rank=3, axes_init="random")
-    model, history = fit(X, p, c, config=cfg)
-    assert model.head.n_basis == 2 and history[-1]["disc"] < history[0]["disc"]
-
-
 def test_fit_runs_with_label_regularisation():
     X, p, c, s, n = _toy_dataset()
-    cfg = TrainConfig(pert_embedding_init="random", n_factors=5, epochs=4, batch_size=64, log_every=0, seed=0, head="distance",
-                      noise_rank=3, label_weight_decay=1e-2, label_dropout=0.2)
+    cfg = TrainConfig(pert_embedding_init="random", n_factors=5, epochs=4, batch_size=64, log_every=0, seed=0, noise_rank=3, label_weight_decay=1e-2, label_dropout=0.2)
     model, history = fit(X, p, c, target_col=None, config=cfg)
     assert any(isinstance(m, torch.nn.Dropout) for m in model.label_net.modules())
     assert np.isfinite(history[-1]["disc"])
-
-
-def test_sparsity_penalty_runs_and_is_logged():
-    X, p, c, s, n = _toy_dataset()
-    cfg = TrainConfig(pert_embedding_init="random", n_factors=5, epochs=4, batch_size=64, log_every=0, seed=0,
-                      head="distance", sparsity=0.1, noise_rank=3, axes_init="random")
-    model, history = fit(X, p, c, target_col=None, config=cfg)
-    assert all(h["sparsity"] > 0 for h in history)
-
-
-@pytest.mark.parametrize("label_model", ["product", "ammi"])
-def test_fit_runs_with_a_structured_label_model(label_model):
-    X, p, c, s, n = _toy_dataset()
-    cfg = TrainConfig(pert_embedding_init="random", n_factors=5, epochs=6, batch_size=64, log_every=0, seed=0,
-                      label_model=label_model, noise_rank=3)
-    model, history = fit(X, p, c, target_col=None, config=cfg)
-    assert isinstance(model.label_net, ProductLabelNet)
-    assert isinstance(model.label_net, AMMILabelNet) == (label_model == "ammi")
-    assert history[-1]["disc"] < history[0]["disc"]
-
-
-# ----------------------------------------------------------------- negatives
 
 
 def _toy_labels(n_pert=12, n_ctx=4, n_strata=11):
@@ -547,15 +438,6 @@ def test_fit_rejects_mismatched_array_lengths():
         fit(X, p, c[:-1], config=TrainConfig(pert_embedding_init="random", epochs=1, log_every=0))
 
 
-def test_optional_tc_term_runs():
-    X, p, c, s, n = _toy_dataset(n_pert=10, n_genes=30)
-    cfg = TrainConfig(pert_embedding_init="random", 
-        n_factors=4, epochs=3, batch_size=32, log_every=0, tc_weight=0.1
-    )
-    _, history = fit(X, p, c, config=cfg)
-    assert history[-1]["tc"] != 0.0
-
-
 def test_contrastive_loss_is_minimised_by_confident_correct_logits():
     good = contrastive_loss(torch.tensor([6.0, 6.0]), torch.tensor([-6.0, -6.0]))
     bad = contrastive_loss(torch.tensor([-6.0, -6.0]), torch.tensor([6.0, 6.0]))
@@ -600,7 +482,7 @@ def _toy_meta(n_pert=12, n_ctx=4, n_strata=3):
 
 def test_fit_trains_only_on_train_rows():
     """A held-out pair must never appear in a training batch."""
-    from extract.data.augment import make_split
+    from extract.data.splits import make_split
 
     meta = _toy_meta()
     X, p, c, s, n = _toy_dataset(n_pert=12, n_ctx=4, n_strata=3, n_genes=40)
@@ -612,7 +494,7 @@ def test_fit_trains_only_on_train_rows():
     assert not (train_pairs & test_pairs)
 
     cfg = TrainConfig(pert_embedding_init="random", n_factors=4, epochs=4, batch_size=32, log_every=0,
-                      eval_every=2, patience=0)
+                      eval_every=2)
     model, history = fit(
         X, p, c, config=cfg,
         train_rows=split.train, val_rows=split.test,
@@ -622,7 +504,7 @@ def test_fit_trains_only_on_train_rows():
 
 
 def test_all_eleven_samples_of_a_held_out_pair_move_together():
-    from extract.data.augment import make_split
+    from extract.data.splits import make_split
 
     meta = _toy_meta(n_pert=20, n_ctx=3, n_strata=11)
     split = make_split(meta, level="pair", test_frac=0.15, seed=1)
@@ -659,56 +541,16 @@ def test_evaluate_returns_the_documented_keys():
     )
     m = evaluate(model, torch.from_numpy(X), p, c, rows, sampler,
                  np.random.default_rng(0))
-    for key in ("n_rows", "accuracy", "disc", "recon", "real_score_mean",
-                "fake_score_mean", "span_residual_median", "span_residual_q90"):
+    for key in ("auc", "n_rows", "accuracy", "disc", "disc_objective", "recon", "real_score_mean",
+                "fake_score_mean", "span_residual_median", "span_residual_q90",
+                "lasso_objective", "programs_per_pair"):
         assert key in m, key
-    assert 0.0 <= m["accuracy"] <= 1.0
+    assert 0.0 <= m["accuracy"] <= 1.0 and 0.0 <= m["auc"] <= 1.0
     assert 0.0 <= m["span_residual_median"] <= 1.5
-    assert m["n_synthetic"] == 0 and np.isnan(m["synth_accuracy"])
-
-
-def test_evaluate_never_scores_synthetic_rows_as_positives():
-    """Synthetic rows are negatives under their own label. The permuted-label
-    metrics must be exactly what the measured rows alone give, and the
-    synthetic rows must be reported on their own."""
-    from extract.train import evaluate
-
-    X, p, c, s, n = _toy_dataset(n_pert=10, n_ctx=3, n_strata=3, n_genes=30)
-    cfg = TrainConfig(pert_embedding_init="random", n_factors=4, epochs=2, batch_size=32, log_every=0,
-                      eval_every=0)
-    model, _ = fit(X, p, c, config=cfg)
-
-    k = min(200, len(X))
-    rng = np.random.default_rng(1)
-    fake = np.stack([X[rng.permutation(k), j] for j in range(X.shape[1])], 1)
-    Xb = torch.from_numpy(np.vstack([X[:k], fake]).astype(np.float32))
-    cat = lambda a: np.concatenate([a[:k], a[:k]])
-    pb, cb, sb = cat(p), cat(c), cat(s)
-    flag = np.r_[np.ones(k, bool), np.zeros(k, bool)]
-
-    def _eval(rows, is_real):
-        sampler = StratifiedNegativeSampler(
-            perturbation_idx=pb[rows], context_idx=cb[rows], stratum=sb[rows],
-            n_perturbations=int(p.max()) + 1, n_contexts=int(c.max()) + 1,
-        )
-        return evaluate(model, Xb, pb, cb, rows, sampler,
-                        np.random.default_rng(0), is_real=is_real)
-
-    real_only = _eval(np.arange(k), None)
-    mixed = _eval(np.arange(2 * k), flag)
-    for key in ("n_rows", "accuracy", "disc", "recon", "real_score_mean",
-                "fake_score_mean", "span_residual_median"):
-        assert mixed[key] == pytest.approx(real_only[key]), key
-    assert mixed["n_synthetic"] == k
-    assert 0.0 <= mixed["synth_accuracy"] <= 1.0
-    assert np.isfinite(mixed["disc_synth"])
-
-
-# ------------------------------------------------------- three-way split
 
 
 def test_three_way_split_is_disjoint_and_complete():
-    from extract.data.augment import make_split
+    from extract.data.splits import make_split
 
     meta = _toy_meta(n_pert=40, n_ctx=4, n_strata=11)
     split = make_split(meta, level="pair", test_frac=0.1, val_frac=0.1, seed=0)
@@ -721,7 +563,7 @@ def test_three_way_split_is_disjoint_and_complete():
 
 
 def test_three_way_split_keeps_pairs_whole():
-    from extract.data.augment import make_split
+    from extract.data.splits import make_split
 
     meta = _toy_meta(n_pert=30, n_ctx=3, n_strata=11)
     split = make_split(meta, level="pair", test_frac=0.12, val_frac=0.12, seed=3)
@@ -737,47 +579,41 @@ def test_three_way_split_keeps_pairs_whole():
 
 
 def test_split_rejects_impossible_fractions():
-    from extract.data.augment import make_split
+    from extract.data.splits import make_split
 
     meta = _toy_meta(n_pert=4, n_ctx=1, n_strata=2)
     with pytest.raises(ValueError, match="would hold out"):
         make_split(meta, level="pair", test_frac=0.7, val_frac=0.7, seed=0)
 
 
-def test_early_stopping_restores_the_best_epoch():
-    """The last epoch is not the model we want; the selected one is. Checked
-    for BOTH selection rules -- "accuracy" maximises, "total" (eq. 12, the
-    quantity actually minimised) minimises and therefore stops at the
-    overfitting onset. The two can pick different epochs."""
-    from extract.data.augment import make_split
+def test_the_kept_model_is_the_epoch_with_the_best_validation_auc():
+    """Every epoch is trained; the kept state is the epoch whose validation ROC
+    AUC is highest, and the last epoch's state is kept separately."""
+    from extract.data.splits import make_split
 
     meta = _toy_meta(n_pert=16, n_ctx=4, n_strata=3)
     X, p, c, s, n = _toy_dataset(n_pert=16, n_ctx=4, n_strata=3, n_genes=40)
     split = make_split(meta, level="pair", test_frac=0.12, val_frac=0.12, seed=0)
-
-    for metric, pick in (("accuracy", max), ("total", min)):
-        cfg = TrainConfig(pert_embedding_init="random", n_factors=4, epochs=30, batch_size=32, log_every=0,
-                          eval_every=1, patience=2, seed=0, select_on=metric)
-        model, history = fit(X, p, c, config=cfg,
-                             train_rows=split.train, val_rows=split.val)
-        key = f"val_{metric}"
-        evaluated = [h for h in history if key in h]
-        best = pick(evaluated, key=lambda h: h[key])
-        assert history[-1]["selected_epoch"] == best["epoch"], metric
-        assert len(history) <= 30
+    cfg = TrainConfig(pert_embedding_init="random", n_factors=4, epochs=12, batch_size=32, log_every=0,
+                      eval_every=1, seed=0)
+    model, history = fit(X, p, c, config=cfg, train_rows=split.train, val_rows=split.val)
+    best = max((h for h in history if "val_auc" in h), key=lambda h: h["val_auc"])
+    assert len(history) == 12
+    assert history[-1]["selected_epoch"] == best["epoch"] == model.selected_epoch_
+    assert model.final_epoch_ == 11 and set(model.final_state_) == set(model.state_dict())
 
 
 def test_total_is_the_objective_on_both_train_and_val():
     """`total` must equal disc + alpha*recon on both sides, so the two curves
     are the same quantity and their crossing is meaningful."""
-    from extract.data.augment import make_split
+    from extract.data.splits import make_split
 
     meta = _toy_meta(n_pert=16, n_ctx=4, n_strata=3)
     X, p, c, s, n = _toy_dataset(n_pert=16, n_ctx=4, n_strata=3, n_genes=40)
     split = make_split(meta, level="pair", test_frac=0.12, val_frac=0.12, seed=0)
     alpha = 700.0
     cfg = TrainConfig(pert_embedding_init="random", n_factors=4, alpha=alpha, epochs=6, batch_size=32,
-                      log_every=0, eval_every=1, patience=0, seed=0)
+                      log_every=0, eval_every=1, seed=0)
     _, history = fit(X, p, c, config=cfg,
                      train_rows=split.train, val_rows=split.val)
     for h in history:
@@ -788,8 +624,7 @@ def test_total_is_the_objective_on_both_train_and_val():
         if "val_total" in h:
             vgene = cfg.gene_sparsity * h["val_gene_penalty"] + cfg.distinct_weight * h["val_distinct_penalty"]
             assert abs(h["val_total"]
-                       - (h["val_disc_objective"] + alpha * h["val_recon_objective"] + vgene)) < 1e-6
-
+                       - (h["val_disc_objective"] + alpha * h["val_lasso_objective"] + vgene)) < 1e-6
 
 
 def test_fit_rejects_overlapping_train_and_val():
@@ -830,49 +665,6 @@ def test_span_residual_excludes_the_masked_entry():
     assert torch.allclose(r_masked, expect, atol=1e-6)
 
 
-def test_is_real_false_rows_are_excluded_from_reconstruction():
-    """Rows flagged not-real must not shape B. Appending pure noise marked
-    is_real=False must leave B where it would have been without those rows."""
-    rng = np.random.default_rng(0)
-    n, G = 400, 24
-    X = rng.normal(size=(n, G)).astype(np.float32)
-    p = rng.integers(0, 8, n)
-    c = rng.integers(0, 3, n)
-    s = rng.integers(0, 4, n)
-    cells = rng.integers(50, 500, n).astype(float)
-    cfg = TrainConfig(pert_embedding_init="random", n_factors=3, epochs=2, batch_size=64, seed=0,
-                      log_every=0, eval_every=0, patience=0)
-
-    m_ref, _ = fit(X, p, c, config=cfg)
-
-    fake = (rng.normal(size=(n, G)) * 50).astype(np.float32)   # wildly off-scale
-    X2 = np.vstack([X, fake])
-    pad = lambda a: np.concatenate([a, a])
-    real_flag = np.concatenate([np.ones(n, bool), np.zeros(n, bool)])
-    m_gated, _ = fit(X2, pad(p), pad(c),
-                     config=cfg, is_real=real_flag)
-
-    # Not bit-identical (batching differs), but the gate must keep B finite and
-    # on-scale rather than dragged toward the 50x noise.
-    B_ref, B_gated = m_ref.loading_matrix(), m_gated.loading_matrix()
-    assert np.isfinite(B_gated).all()
-    assert B_gated.std() < 10 * B_ref.std()
-
-
-def test_is_real_rejects_bad_input():
-    rng = np.random.default_rng(0)
-    n, G = 300, 16
-    X = rng.normal(size=(n, G)).astype(np.float32)
-    a = (rng.integers(0, 6, n), rng.integers(0, 3, n),
-         rng.integers(0, 4, n), rng.integers(50, 300, n).astype(float))
-    cfg = TrainConfig(pert_embedding_init="random", n_factors=2, epochs=1, batch_size=64, log_every=0,
-                      eval_every=0, patience=0)
-    with pytest.raises(ValueError, match="is_real has"):
-        fit(X, *a[:2], config=cfg, is_real=np.ones(n - 1, bool))
-    with pytest.raises(ValueError, match="no real rows"):
-        fit(X, *a[:2], config=cfg, is_real=np.zeros(n, bool))
-
-
 def test_negatives_never_name_a_held_out_pair():
     """The sampler is built on training rows only, and every strategy must draw
     from an OBSERVED (perturbation, context) pair, so a held-out pair is never
@@ -902,145 +694,11 @@ def test_negatives_never_name_a_held_out_pair():
     assert not ((neg_p == P) & (neg_c == C)).any(), "a negative kept its own label"
 
 
-
-def test_synthetic_rows_are_negatives_for_L_disc_and_signed_in_L_recon():
-    """Synthetic rows go through the SAME head as negatives -- the question is
-    "did p in c produce this?", and a shuffled vector answers no. They must not
-    enter L_recon with a plus sign; recon_fake_weight decides whether they are
-    dropped (0) or actively pushed away (>0)."""
-    rng = np.random.default_rng(0)
-    n, G = 256, 20
-    X = rng.normal(size=(n, G)).astype(np.float32)
-    fake = (rng.normal(size=(n, G)) * 100).astype(np.float32)     # off-scale
-    p = rng.integers(0, 6, n); c = rng.integers(0, 3, n)
-    st = rng.integers(0, 3, n); cells = rng.integers(50, 400, n).astype(float)
-    dbl = lambda a: np.concatenate([a, a])
-    flag = np.concatenate([np.ones(n, bool), np.zeros(n, bool)])
-    Xb = np.vstack([X, fake])
-
-    for beta in (0.0, 0.5):
-        # least-squares activities: this checks how synthetic rows enter L_recon
-        cfg = TrainConfig(pert_embedding_init="random", n_factors=3, epochs=2, batch_size=128, seed=0,
-                          log_every=0, eval_every=0, patience=0, coding="ls", alpha=1.0,
-                          label_dropout=0.0, label_weight_decay=0.0, head_normaliser=False, axes_init="identity",
-                          recon_fake_weight=beta)
-        m, hist = fit(Xb, dbl(p), dbl(c),
-                      config=cfg, is_real=flag)
-        B = m.loading_matrix()
-        assert np.isfinite(B).all(), f"beta={beta}: non-finite B"
-        assert hist[-1]["accuracy"] > 0.4, (beta, hist[-1]["accuracy"])
-        assert B.std() < 5.0, (beta, B.std())   # not dragged onto the 100x noise
-
-
-def test_recon_fake_weight_changes_the_objective():
-    """beta > 0 must actually alter the fit, else the minus term is inert."""
-    rng = np.random.default_rng(1)
-    n, G = 192, 16
-    X = rng.normal(size=(n, G)).astype(np.float32)
-    fake = rng.normal(size=(n, G)).astype(np.float32)
-    a = [rng.integers(0, 5, n), rng.integers(0, 3, n),
-         rng.integers(0, 3, n), rng.integers(50, 300, n).astype(float)]
-    dbl = lambda v: np.concatenate([v, v])
-    flag = np.concatenate([np.ones(n, bool), np.zeros(n, bool)])
-    out = {}
-    for beta in (0.0, 1.0):
-        cfg = TrainConfig(pert_embedding_init="random", subspace="free", n_factors=3, epochs=3, batch_size=128, seed=0,
-                          log_every=0, eval_every=0, patience=0,
-                          recon_fake_weight=beta)
-        m, _ = fit(np.vstack([X, fake]), *[dbl(v) for v in a[:2]],
-                   config=cfg, is_real=flag)
-        out[beta] = m.loading_matrix()
-    assert not np.allclose(out[0.0], out[1.0]), "recon_fake_weight had no effect"
-
-
-def test_apply_split_keeps_synthetic_rows_with_their_real_twin():
-    """A synthetic row inherits a real pair's label, so it must land in the
-    SAME half. Re-drawing the split over the combined frame would scatter the
-    twins and leak a held-out pair's synthetic copy into training."""
-    from extract.data.augment import apply_split, make_split
-
-    rng = np.random.default_rng(0)
-    perts = [f"P{i:03d}" for i in range(60)]
-    ctxs = [f"C{i}" for i in range(4)]
-    rows = [{"perturbation": p, "context": c, "label": f"{p}__sub{s:02d}" if s else p,
-             "n_cells": 100 + s}
-            for p in perts for c in ctxs for s in range(3)]
-    real = pd.DataFrame(rows)
-    split = make_split(real, level="pair", test_frac=0.2, val_frac=0.1, seed=0)
-
-    fake = real.copy()                       # one synthetic twin per real row
-    combined = pd.concat([real, fake], ignore_index=True)
-    ext = apply_split(split, combined)
-
-    n = len(real)
-    # every synthetic row is in the same half as its twin
-    assert (ext.train[:n] == ext.train[n:]).all()
-    assert (ext.test[:n] == ext.test[n:]).all()
-    assert (ext.val[:n] == ext.val[n:]).all()
-    # and the halves still partition the combined frame
-    assert int(ext.train.sum() + ext.test.sum() + ext.val.sum()) == len(combined)
-    # no held-out pair appears in train, on either side
-    key = combined.perturbation + "|" + combined.context
-    assert not (set(key[ext.train]) & set(key[ext.test]))
-    assert not (set(key[ext.train]) & set(key[ext.val]))
-
-
-
-def test_balance_negatives_matches_negative_count_to_positives():
-    """|permuted| + |synthetic| must equal |positives|. With an equal number of
-    synthetic rows that means every permuted negative is dropped; with half as
-    many, half are kept."""
-    from extract.train import Extract
-    rng = np.random.default_rng(0)
-    n, G = 256, 16
-    X = rng.normal(size=(n, G)).astype(np.float32)
-    a = [rng.integers(0, 5, n), rng.integers(0, 3, n),
-         rng.integers(0, 3, n), rng.integers(50, 300, n).astype(float)]
-
-    seen = {}
-    orig = Extract.score
-    def spy(self, z, p_i, c_i):
-        seen["n"] = seen.get("n", 0) + len(z)
-        return orig(self, z, p_i, c_i)
-
-    for n_synth, expect_frac in ((n, 0.0), (n // 2, 0.5)):
-        Xf = rng.normal(size=(n_synth, G)).astype(np.float32)
-        cat = lambda v: np.concatenate([v, v[:n_synth]])
-        flag = np.concatenate([np.ones(n, bool), np.zeros(n_synth, bool)])
-        cfg = TrainConfig(pert_embedding_init="random", n_factors=3, epochs=1, batch_size=n + n_synth,
-                          seed=0, log_every=0, eval_every=0, patience=0)
-        seen.clear()
-        Extract.score = spy
-        try:
-            fit(np.vstack([X, Xf]), *[cat(v) for v in a[:2]], config=cfg, is_real=flag)
-        finally:
-            Extract.score = orig
-        # scored = positives(n) + permuted(~expect_frac*n) + synthetic(n_synth)
-        expected = n + expect_frac * n + n_synth
-        assert abs(seen["n"] - expected) < 0.25 * n, (n_synth, seen["n"], expected)
-
-
-def test_balance_negatives_is_inert_without_synthetic_rows():
-    rng = np.random.default_rng(3)
-    n, G = 256, 16
-    X = rng.normal(size=(n, G)).astype(np.float32)
-    a = [rng.integers(0, 6, n), rng.integers(0, 3, n),
-         rng.integers(0, 3, n), rng.integers(50, 300, n).astype(float)]
-    Bs = []
-    for bal in (True, False):
-        cfg = TrainConfig(pert_embedding_init="random", n_factors=3, epochs=2, batch_size=128, seed=0,
-                          log_every=0, eval_every=0, patience=0,
-                          balance_negatives=bal)
-        m, _ = fit(X, *a[:2], config=cfg)
-        Bs.append(m.loading_matrix())
-    assert np.allclose(Bs[0], Bs[1])
-
-
 def test_single_context_perturbations_always_train():
     """A perturbation with one pair has nothing left to train e_p on if that
     pair is held out, so its row is unpredictable by construction. Those pairs
     must stay in train."""
-    from extract.data.augment import make_split
+    from extract.data.splits import make_split
 
     rows = []
     for i in range(200):                       # 12 contexts each
@@ -1086,35 +744,16 @@ def test_evaluate_takes_its_device_from_the_model_not_the_data():
         assert frag in src_, f"missing device move: {frag}"
 
 
-def test_min_epochs_keeps_training_but_still_restores_the_best_epoch():
-    """min_epochs decides when training STOPS, not which state is kept: a run
-    whose validation bottoms out early must still train to min_epochs, and
-    still restore the early best epoch."""
-    from extract.data.augment import make_split
-
-    meta = _toy_meta(n_pert=16, n_ctx=4, n_strata=3)
-    X, p, c, s, n = _toy_dataset(n_pert=16, n_ctx=4, n_strata=3, n_genes=40)
-    split = make_split(meta, level="pair", test_frac=0.12, val_frac=0.12, seed=0)
-    cfg = TrainConfig(pert_embedding_init="random", n_factors=4, epochs=40, batch_size=32, log_every=0,
-                      eval_every=1, patience=1, min_epochs=25, seed=0, select_on="total")
-    _, history = fit(X, p, c, config=cfg,
-                     train_rows=split.train, val_rows=split.val)
-    assert len(history) >= 25, len(history)
-    ev = [h for h in history if "val_total" in h]
-    best = min(ev, key=lambda h: h["val_total"])
-    assert history[-1]["selected_epoch"] == best["epoch"]
-
-
 def test_on_eval_snapshots_B_at_every_evaluation():
     """on_eval fires once per validation pass with the live model, so a copy
     of B taken there is the B of that epoch -- not the restored one."""
-    from extract.data.augment import make_split
+    from extract.data.splits import make_split
 
     meta = _toy_meta(n_pert=16, n_ctx=4, n_strata=3)
     X, p, c, s, n = _toy_dataset(n_pert=16, n_ctx=4, n_strata=3, n_genes=40)
     split = make_split(meta, level="pair", test_frac=0.12, val_frac=0.12, seed=0)
     cfg = TrainConfig(pert_embedding_init="random", n_factors=4, epochs=10, batch_size=32, log_every=0,
-                      eval_every=3, patience=0, select_on="accuracy", seed=0)
+                      eval_every=3, seed=0)
     snaps = {}
     model, history = fit(X, p, c, config=cfg,
                          train_rows=split.train, val_rows=split.val,

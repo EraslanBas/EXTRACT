@@ -585,10 +585,9 @@ With one context only the first strategy exists, and it suffices.
   pair contributes equal numbers of both.
 - **Only label swaps.** This is the setting in which the best classifier is the
   density ratio above, so the head's form is the right one. Artificial
-  negatives made by shuffling genes across rows remain available
-  (`--shuffled-frac`), but are not used: they ask a different question (is this
-  a plausible response at all?), whose optimal classifier is not of the head's
-  form.
+  negatives (for example rows with their genes shuffled) would ask a different
+  question (is this a plausible response at all?), whose optimal classifier is
+  not of the head's form.
 
 ### Training loop
 
@@ -691,16 +690,12 @@ validation.
 | Field | Role |
 |---|---|
 | `subspace` / `subspace_method` | `fixed` / `pca`: $\mathbf B = \mathbf A\mathbf V$ with $\mathbf V$ the PCA of the pair means; `free` learns $\mathbf B$ directly |
-| `axes_init` | `jd`: start $\mathbf A$ at the joint-diagonalisation axes; `random` and `identity` also available |
+| `axes_init` | `jd`: start $\mathbf A$ at the joint-diagonalisation axes; `random`: a random rotation per seed |
 | `coding` | `group_lasso`: activities by the per-pair group lasso; `ls` for plain least squares |
 | `lasso_refit` | the discriminator sees least-squares activities on the selected programs |
-| `head` / `head_normaliser` | `statistics` with the label-only term $c_k(u)$ |
-| `gene_prior` | `l1`: the L1/L2 sparseness of each program's loadings |
 | `basis` | the head's statistics (lin, sq, abs, tanh); must keep a non-quadratic one |
 | `pert_embedding_init` | `response`: start from the target gene's responses; contexts from the control means (`--context-embedding-init control-means`) |
-| `select_on` | `auc`: validation ROC AUC picks the epoch |
-| shuffled negatives | `--shuffled-frac 0`: label swaps only |
-| `unconstrained_head` / `no_mask` | ablations: an MLP head (removes identifiability); no on-target mask |
+| `no_mask` | ablation: no on-target mask |
 
 **Hyperparameters to tune**
 
@@ -723,9 +718,9 @@ validation.
 | `extract/de/` | Welch statistics → `ashr` → merge → pivot; full-data and disjoint pseudobulk rows; matrix assembly |
 | `extract/data/` | `noise.py` the subspace $\mathbf V$ (PCA of pair means; signal-to-noise variants); `splits.py` test pairs, validation, the low-cell filter, gene lists |
 | `extract/models/` | `loadings.py` $\mathbf B = \mathbf A\mathbf V$ and projections; `group_lasso.py` the per-pair group lasso and refit; `heads.py` the per-component head; `label_net.py` |
-| `extract/objectives/` | `contrastive.py` negative sampler and BCE; `reconstruction.py` |
+| `extract/objectives/` | `contrastive.py` label-swap sampler and BCE; `reconstruction.py` the masked squared error |
 | `extract/train.py` | `TrainConfig`, `Extract`, `fit`, `evaluate`, `jd_axes`, embedding starts, `load_model` |
 | `extract/interpret/` | loadings, sign anchoring, effect decomposition, enrichment export |
 | `extract/evaluation/` | held-out reconstruction, span residual, cross-seed stability |
 | `baselines/` | PCA, linear ICA, context joint diagonalisation |
-| `scripts/` | build the split, run a sweep (`sweep_grid.py`), fit one model, read test once |
+| `scripts/` | build the split (`build_split.py`), train models (`sweep_grid.py`; `fit_model.py` for one), read test once (`read_test.py`) |

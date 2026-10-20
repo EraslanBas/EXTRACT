@@ -1,10 +1,11 @@
 """EXTRACT: the model and its training loop.
 
-    L = L_disc + alpha * L_recon   [ + tc_weight * L_tc ]
+    L = L_disc + alpha * L_lasso + gamma * L_genes + mu * L_distinct
 
-``L_disc`` picks the rotation, ``L_recon`` picks the subspace. Implements
-the method paper exactly; equation numbers in comments refer to
-it.
+``L_disc`` is the label-swap discriminator on the per-component head,
+``L_lasso`` the per-pair group-lasso objective (reconstruction error plus the
+group penalty), ``L_genes`` the L1/L2 sparseness of each program's loadings and
+``L_distinct`` the hinge on near-collinear programs. See the documentation.
 """
 
 from __future__ import annotations
@@ -19,8 +20,8 @@ import torch.nn.functional as F
 from torch import nn
 
 from .data.ontarget import on_target_index
-from .models import (initial_axes, AMMILabelNet, FactorizedLabelNet, ProductLabelNet, FixedBasisLoadings, GlobalLoadings,
-                     PerComponentHead, UnconstrainedHead, DistanceHead)
+from .models import (initial_axes, FactorizedLabelNet, FixedBasisLoadings, GlobalLoadings,
+                     PerComponentHead)
 from .models.heads import DEFAULT_BASIS
 from .models.loadings import NO_MASK
 from .objectives import (
@@ -30,148 +31,69 @@ from .objectives import (
     discrimination_accuracy,
     weighted_squared_error,
 )
-from .objectives.total_correlation import (
-    TotalCorrelationDiscriminator,
-    shuffle_coordinates,
-    tc_discriminator_loss,
-    tc_penalty,
-)
 
 
 @dataclass
 class TrainConfig:
-    #: Keep near the effective rank of the data. Participation-ratio effective
-    #: rank on these matrices is 16.0, so 20-30 is the sensible range.
+    #: Number of programs d. Dataset-specific; tune it.
     n_factors: int = 20
 
-    #: Must retain a non-quadratic statistic: a purely quadratic head is
-    #: rotation invariant and identifies nothing.
+    #: Statistics of the per-component head. Must retain a non-quadratic one:
+    #: a purely quadratic head is rotation invariant and identifies nothing.
     basis: tuple[str, ...] = DEFAULT_BASIS
-    #: Sizes of the perturbation and context embeddings (MLP label model).
-    #: 2,125 perturbations but only 16 contexts, hence the different sizes
-    #: (8 components hold 96% of the variation of the contexts' control means).
+    #: Sizes of the perturbation and context embeddings and of the label
+    #: network's hidden layer.
     embedding_dim: int = 64
     context_embedding_dim: int = 8
     label_hidden: int = 128
+    #: Conditioning of the least-squares projections and refit.
     ridge: float = 1e-4
 
-    #: The reconstruction weight of eq. (12). With ``d``, the only real knob.
-    #: Too low and the contrastive term selects tiny-variance directions that
-    #: discriminate well but carry no interpretable gene program; too high and
-    #: the model collapses to PCA and stops responding to the label.
+    #: Weight of the group-lasso objective (reconstruction error plus group
+    #: penalty, per row and gene) against the discriminator loss.
     alpha: float = 700.0
-
-    #: Thin the label-permuted negatives so that
-    #: ``|permuted| + |synthetic| == |positives|``, i.e. one negative per
-    #: positive overall. Without it every real row emits a permuted negative
-    #: AND every synthetic row is a negative, so negatives outnumber positives.
-    #: Mean-reduced BCE already equalises the two *terms*, but balancing the
-    #: counts also makes the synthetic share of the negatives equal the
-    #: fraction of synthetic rows loaded -- so the mixture is set by
-    #: ``--shuffled-frac`` and needs no separate weight. No effect without
-    #: synthetic rows.
-    balance_negatives: bool = True
-
-    #: Weight on the reconstruction error of SYNTHETIC rows (``is_real=False``),
-    #: entered with a MINUS sign. ``0.0`` drops them from ``L_recon`` entirely;
-    #: ``> 0`` actively pushes ``B`` away from spanning them, which is
-    #: contrastive PCA against a marginal-matched background. Either way ``B``
-    #: is fitted only to genuinely observed perturbation responses.
-    recon_fake_weight: float = 1.0
-
-    #: Off by default. Independence is not identifiability -- see
-    #: objectives.total_correlation.
-    tc_weight: float = 0.0
-    tc_hidden: int = 256
-    tc_lr: float = 1e-4
 
     batch_size: int = 1024
     epochs: int = 1000
     lr: float = 1e-3
-    weight_decay: float = 0.0
     grad_clip: float | None = 5.0
     seed: int = 0
     device: str = "cpu"
 
-    #: How the span of B is set.
-    #:
-    #: ``"fixed"`` (the model): B = A V. ``V`` [d, G] is the label-driven
-    #: subspace -- the d directions with the most perturbation-driven variation
-    #: per unit of estimation noise, computed once from the training rows
-    #: (:mod:`extract.data.noise`) -- and only the d x d matrix ``A`` is learned,
-    #: so the discriminator chooses oblique axes inside span(V). The span, and
-    #: with it the reconstruction, cannot move, so ``alpha`` and
-    #: ``recon_fake_weight`` have no effect.
-    #:
-    #: ``"free"``: B learned directly by both terms (the earlier model; an
-    #: ablation). Experimental: ``"anchored"`` (B initialised at V,
-    #: reconstruction in the correlated-noise metric) and ``"frozen"`` (B = V
-    #: exactly, a probe of a given set of axes).
+    #: How the span of B is set. ``"fixed"`` (the model): B = A V with V the
+    #: subspace computed once from the training rows and only the d x d matrix
+    #: ``A`` learned. ``"free"``: B learned directly.
     subspace: str = "fixed"
 
-    #: How V is computed (fixed mode). ``"pca"``: PCA of the pair means (every
-    #: row of a pair averaged; uncentred). ``"rca"``: reliable components analysis
-    #: -- the directions whose values agree most between different rows of the
-    #: same pair, relative to their total variance (Dmochowski et al.); R_W
-    #: truncated to its top ``rca_rank`` eigen-directions. ``"snr"``: between-
-    #: pair signal over the within-pair noise model (the previous method; also
-    #: what ``"anchored"`` uses). See extract.data.noise.
+    #: How V is computed. ``"pca"``: PCA of the pair means (every row of a pair
+    #: averaged; uncentred). ``"rca"``: reliable components analysis (the
+    #: directions whose values agree most between different rows of the same
+    #: pair, relative to their total variance; Dmochowski et al.), R_W truncated
+    #: to its top ``rca_rank`` eigen-directions. ``"snr"``: between-pair signal
+    #: over the within-pair noise model. See extract.data.noise.
     subspace_method: str = "pca"
     rca_rank: int = 100
-
-    #: Free mode only. ``"random"``: B starts at random (the earlier free
-    #: model). ``"basis"``: B starts where the fixed model starts, ``A0 V``
-    #: (``A0`` from ``axes_init`` and the seed, V from ``subspace_method``), and
-    #: is then learned freely -- the same start as the fixed model, without the
-    #: constraint.
-    free_init: str = "random"
-
-    #: Rank of the correlated part of the noise model (``"snr"`` and
-    #: ``"anchored"``), and the number of within-pair residuals used to fit it.
+    #: Rank of the correlated part of the noise model (``"snr"``), and the
+    #: number of within-pair residuals used to fit it.
     noise_rank: int = 50
     noise_max_rows: int = 150_000
 
-    #: Starting axes A in the fixed model: ``"identity"`` (B starts at V),
-    #: ``"random"`` (a random rotation of V's axes, drawn from ``seed``) or
-    #: ``"jd"`` (the joint-diagonalisation axes of the per-context covariances
-    #: of the training pair means inside V; see :func:`jd_axes`).
+    #: Free mode only. ``"random"``: B starts at random. ``"basis"``: B starts
+    #: where the fixed model starts, ``A0 V``, and is then learned freely.
+    free_init: str = "random"
+
+    #: Starting axes A: ``"jd"``, the joint-diagonalisation axes of the
+    #: per-context covariances of the training pair means inside V (see
+    #: :func:`jd_axes`), or ``"random"``, a random rotation of V's axes drawn
+    #: from ``seed``.
     axes_init: str = "jd"
-    #: With ``axes_init="jd"``: rotate the JD axes by ``expm(t S)``, ``S`` a
-    #: random skew-symmetric matrix of unit spectral norm drawn from ``seed``,
-    #: so seeds start at different points near the JD axes (0 = all seeds start
-    #: at the JD axes).
-    axes_init_jitter: float = 0.0
 
-    #: How labels map to the head's coefficients lambda. ``"mlp"``: embeddings
-    #: of p and c through an MLP, unconstrained (does not fix the axes).
-    #: ``"product"``: lambda_k(p, c) = f_k(p) * g_k(c), a CP structure that
-    #: does. ``"ammi"``: lambda_k(p, c) = a_k(p) + b_k(c) + f_k(p) * g_k(c),
-    #: main effects plus that interaction; the axes are fixed by the
-    #: interaction alone. See models.label_net.
-    label_model: str = "mlp"
-
-    #: Discriminator head. ``"statistics"``: sum_k sum_j lambda_kj(u) q_j(z_k)
-    #: over the statistics in ``basis``. ``"distance"``: b - sum_k (z_k -
-    #: zhat_k(u))^2 / (2 sigma_k^2), with the label model predicting the
-    #: activities zhat (``basis`` is then unused). See models.heads.
-    head: str = "statistics"
-    #: Statistics head only (ignored by the other heads): the label also
-    #: predicts a per-program term c_k(u) subtracted from the score, standing
-    #: in for the normaliser -log Z(lambda(u)) that the plain statistics head lacks.
-    head_normaliser: bool = True
-
-    #: Distance head only: ``"shared"`` (one learned variance per factor) or
-    #: ``"label"`` (the label network also predicts each factor's variance,
-    #: within a factor of 10 of the baseline; see models.heads.DistanceHead).
-    head_variance: str = "shared"
-
-    #: How a row's activities z are obtained. ``"ls"``: masked least squares
-    #: onto B. ``"group_lasso"``: all rows of a (perturbation, context) pair
-    #: share one selection of programs (models.group_lasso); the loadings are
-    #: kept at unit length and the reconstruction term becomes the lasso
+    #: Activities z. ``"group_lasso"``: all rows of a (perturbation, context)
+    #: pair share one selection of programs (models.group_lasso); the loadings
+    #: are kept at unit length and the reconstruction term is the lasso
     #: objective (error + lasso_lambda * group penalty), so it prefers axes on
-    #: which each pair uses few programs -- also in the fixed mode. Batches are
-    #: built from whole pairs. Branch `group-lasso`, experimental.
+    #: which each pair uses few programs. Batches are built from whole pairs.
+    #: ``"ls"``: masked least squares onto B, for comparison.
     coding: str = "group_lasso"
     lasso_lambda: float = 0.0272
     lasso_steps: int = 30
@@ -181,74 +103,34 @@ class TrainConfig:
 
     #: Regularisation of the label network against memorising training pairs:
     #: decoupled (AdamW) weight decay on its parameters only, and dropout on
-    #: its embeddings and hidden layer (MLP label model). 0 = off.
+    #: its embeddings and hidden layer. 0 = off.
     label_weight_decay: float = 0.01
     label_dropout: float = 0.2
 
-    #: Starting perturbation embeddings (MLP label model). ``"random"``.
-    #: ``"response"``: from how each perturbation's target gene responds, as a
-    #: response gene, across the training pairs -- see
-    #: :func:`response_embeddings`. Perturbations whose target is not a
-    #: response gene keep a random start. Trained further either way.
+    #: Starting perturbation embeddings. ``"response"``: from how each
+    #: perturbation's target gene responds, as a response gene, across the
+    #: training pairs (:func:`response_embeddings`); perturbations whose target
+    #: is not a response gene keep a random start. ``"random"``. Trained further
+    #: either way.
     pert_embedding_init: str = "response"
 
-    #: Weight rho of the activity-sparsity penalty,
-    #: rho * sum_k mean_rows |z_k| / sd(z_k), over the batch's measured
-    #: rows. Each perturbation should engage few programs; mixing the
-    #: axes spreads every response over many factors, so the penalty prefers
-    #: the true axes. Dividing by each factor's spread (kept in the graph)
-    #: stops A from lowering it by rescaling a factor. 0 = off.
-    sparsity: float = 0.0
-
-    #: Gene-side prior: a program involves few genes. gamma *
-    #: sum_k (1 - share of B_k's squared loading in its ``gene_topk`` largest
-    #: genes), a prior on the programs alone (no data rows), acting on A in
-    #: the fixed mode. 0 = off.
+    #: Gene-side prior: few genes per program. gamma * sum_k ||b_k||_1 /
+    #: (||b_k||_2 sqrt(G)) (heavy-tailed loadings), on the programs alone (no
+    #: data rows), acting on A in the fixed mode. 0 = off.
     gene_sparsity: float = 0.05
-    gene_topk: int = 200
-    #: Which gene-side measure gamma multiplies: ``"topk"`` (above) or ``"l1"``
-    #: (sum_k ||b_k||_1 / (||b_k||_2 sqrt(G)), heavy-tailed loadings).
-    gene_prior: str = "l1"
     #: Keep programs distinct: mu * sum_{k<l} max(0, |cos(b_k, b_l)| - tau)^2.
     #: Zero unless two programs are nearly collinear; shared genes are free.
-    #: Stops a gene prior from collapsing several programs onto the same genes.
+    #: Stops the gene prior from collapsing several programs onto the same genes.
     distinct_weight: float = 100.0
     distinct_tau: float = 0.5
-
-    #: Ablation only: replaces the per-component head with an MLP, which
-    #: destroys identifiability. See models.heads.UnconstrainedHead.
-    unconstrained_head: bool = False
 
     #: Ablation only: skips the on-target mask, so knockdown efficiency is free
     #: to claim a factor.
     no_mask: bool = False
 
-    #: Evaluate on the validation rows every N epochs (0 = never).
+    #: Evaluate on the validation rows every N epochs (0 = never). The kept
+    #: state is the epoch with the highest validation ROC AUC.
     eval_every: int = 3
-
-    #: Stop when validation accuracy has not improved for this many
-    #: evaluations, and restore the best-scoring parameters. Set to 0 to run
-    #: all epochs. This is the reason a validation set exists: on the real
-    #: matrices held-out accuracy peaks near epoch 20 and then declines while
-    #: training accuracy keeps climbing, so the last epoch is not the model you
-    #: want -- and choosing the epoch on the *test* set would make its numbers
-    #: no longer held out.
-    patience: int = 0
-
-    #: Never stop before this many epochs, however early validation bottomed
-    #: out. Early stopping still RESTORES the best epoch -- this only decides
-    #: when training stops, not which state is kept. Keeping it running past
-    #: the onset records the full shape of the train and val curves, which is
-    #: the evidence that the onset is an onset rather than noise.
-    min_epochs: int = 0
-
-    #: Validation metric to select on. "accuracy" maximises; "total", "disc"
-    #: and "recon" minimise. "total" is eq. (12) itself, so selecting on it
-    #: stops at the overfitting onset -- the epoch where validation turns up
-    #: while training keeps falling. "accuracy" and "total" can disagree
-    #: sharply: BCE worsens as the head grows confident even while the ranking
-    #: it induces still improves.
-    select_on: str = "auc"
 
     negative_weights: dict[str, float] | None = None
     log_every: int = 10
@@ -268,75 +150,44 @@ class Extract(nn.Module):
         n_contexts: int,
         config: TrainConfig,
         subspace_basis: np.ndarray | None = None,
-        noise_model=None,
         axes0: np.ndarray | None = None,
     ):
         super().__init__()
         A0 = None if axes0 is None else torch.as_tensor(np.asarray(axes0), dtype=torch.float32)
         self.config = config
-        if config.subspace not in ("free", "fixed", "anchored", "frozen"):
-            raise ValueError(f"unknown subspace mode {config.subspace!r}")
-        if config.subspace != "free" and subspace_basis is None:
-            raise ValueError(f"subspace={config.subspace!r} needs subspace_basis")
+        if config.subspace not in ("free", "fixed"):
+            raise ValueError(f"subspace must be 'fixed' or 'free', got {config.subspace!r}")
+        if config.subspace == "fixed" and subspace_basis is None:
+            raise ValueError("subspace='fixed' needs subspace_basis")
         if config.subspace == "free" and config.free_init == "random":
             subspace_basis = None
         if subspace_basis is not None and np.asarray(subspace_basis).shape != (config.n_factors, n_genes):
             raise ValueError(f"subspace_basis must be [{config.n_factors}, {n_genes}]")
-        if config.subspace in ("fixed", "frozen"):
+        if config.subspace == "fixed":
             self.loadings = FixedBasisLoadings(subspace_basis, ridge=config.ridge,
-                                               learn_axes=config.subspace == "fixed",
                                                axes_init=config.axes_init, seed=config.seed, A0=A0)
         else:
             self.loadings = GlobalLoadings(config.n_factors, n_genes, ridge=config.ridge)
-            if config.subspace == "free" and config.free_init == "basis":
+            if config.free_init == "basis":
                 if subspace_basis is None:
                     raise ValueError("free_init='basis' needs subspace_basis")
                 if A0 is None:
                     A0 = initial_axes(config.n_factors, config.axes_init, config.seed)
                 with torch.no_grad():
                     self.loadings.B.copy_(A0 @ torch.as_tensor(np.asarray(subspace_basis), dtype=torch.float32))
-            elif config.subspace == "free" and config.free_init != "random":
+            elif config.free_init != "random":
                 raise ValueError(f"free_init must be 'random' or 'basis', got {config.free_init!r}")
-            if config.subspace == "anchored":
-                if noise_model is None:
-                    raise ValueError("subspace='anchored' needs noise_model")
-                with torch.no_grad():
-                    self.loadings.B.copy_(torch.as_tensor(np.asarray(subspace_basis), dtype=torch.float32))
-                self.loadings.set_noise_metric(noise_model.U, noise_model.s, noise_model.c)
-        if config.head not in ("statistics", "distance"):
-            raise ValueError(f"head must be 'statistics' or 'distance', got {config.head!r}")
-        if config.head == "distance":
-            if config.unconstrained_head:
-                raise ValueError("unconstrained_head is an ablation of the statistics head")
-            if config.head_variance not in ("shared", "label"):
-                raise ValueError(f"head_variance must be 'shared' or 'label', got {config.head_variance!r}")
-            self.head = DistanceHead(config.n_factors, label_variance=config.head_variance == "label")
-        else:
-            self.head = (
-                UnconstrainedHead(config.n_factors, len(config.basis))
-                if config.unconstrained_head
-                else PerComponentHead(config.basis, normaliser=config.head_normaliser)
-            )
-        n_basis = (self.head.n_basis if config.head == "distance"
-                   else self.head.n_outputs if isinstance(self.head, PerComponentHead)
-                   else len(config.basis))
-        if config.label_model in ("product", "ammi"):
-            net = ProductLabelNet if config.label_model == "product" else AMMILabelNet
-            self.label_net = net(n_perturbations, n_contexts,
-                                             config.n_factors, n_basis)
-        elif config.label_model == "mlp":
-            self.label_net = FactorizedLabelNet(
-                n_perturbations=n_perturbations,
-                n_contexts=n_contexts,
-                n_factors=config.n_factors,
-                n_basis=n_basis,
-                embedding_dim=config.embedding_dim,
-                context_embedding_dim=config.context_embedding_dim,
-                hidden=config.label_hidden,
-                dropout=config.label_dropout,
-            )
-        else:
-            raise ValueError(f"label_model must be 'mlp', 'product' or 'ammi', got {config.label_model!r}")
+        self.head = PerComponentHead(config.basis, normaliser=True)
+        self.label_net = FactorizedLabelNet(
+            n_perturbations=n_perturbations,
+            n_contexts=n_contexts,
+            n_factors=config.n_factors,
+            n_basis=self.head.n_outputs,
+            embedding_dim=config.embedding_dim,
+            context_embedding_dim=config.context_embedding_dim,
+            hidden=config.label_hidden,
+            dropout=config.label_dropout,
+        )
 
     # ---- forward pieces ---------------------------------------------------
 
@@ -346,7 +197,7 @@ class Extract(nn.Module):
     ) -> torch.Tensor:
         """``z`` -- eq. (2)/(4). Masked when ``target_col`` is given. With
         ``coding="group_lasso"`` the group-lasso activities (``groups`` [n]:
-        one id per (perturbation, context, measured/synthetic)); the raw lasso
+        one id per (perturbation, context) pair); the raw lasso
         activities and the selection are kept in ``lasso_raw_`` / ``lasso_sel_``."""
         z = self.loadings.project(x, target_col)
         if self.config.coding == "ls":
@@ -378,12 +229,7 @@ class Extract(nn.Module):
         """``psi_k`` per factor -- [batch, n_factors]. The per-factor evidence
         of table 2, not a per-factor decision: these are summed before any
         decision is taken."""
-        if isinstance(self.head, UnconstrainedHead):
-            raise TypeError("the unconstrained head has no per-component terms")
-        lam = self.label_net(perturbation_idx, context_idx)
-        if isinstance(self.head, DistanceHead):
-            return self.head.evidence(z, lam)
-        return self.head.evidence(z, lam)
+        return self.head.evidence(z, self.label_net(perturbation_idx, context_idx))
 
     @property
     def B(self) -> torch.Tensor:
@@ -399,8 +245,7 @@ class Extract(nn.Module):
 
 def jd_axes(
     X: np.ndarray, perturbation_idx: np.ndarray, context_idx: np.ndarray,
-    rows: np.ndarray, V: np.ndarray, is_real: np.ndarray | None = None,
-    jitter: float = 0.0, seed: int = 0,
+    rows: np.ndarray, V: np.ndarray,
 ) -> np.ndarray:
     """Starting axes ``A0`` [d, d] for ``B = A0 V``: the joint-diagonalisation
     axes of the per-context covariances of the training pair means, inside the
@@ -411,15 +256,13 @@ def jd_axes(
     the context) is ``S_c``; with ``W = (mean_c S_c)^{-1/2}``, an orthogonal
     ``U`` makes every ``W S_c W`` as diagonal as possible (Jacobi joint
     diagonalisation). The programs are the columns of the mixing ``W^{-1} U``,
-    i.e. ``B = U^T W^{-1} Q^T``, rows scaled to unit length. Uses the measured
-    training rows only. ``jitter > 0`` rotates the axes by ``expm(jitter S)``
-    (S random skew-symmetric, unit spectral norm, from ``seed``)."""
-    from scipy.linalg import expm
+    i.e. ``B = U^T W^{-1} Q^T``, rows scaled to unit length. Uses the training
+    rows only."""
     from baselines.joint_diagonalization import joint_diagonalize
     from .data.noise import pair_means
     rows = np.nonzero(rows)[0] if np.asarray(rows).dtype == bool else np.asarray(rows)
     n_c = int(context_idx.max()) + 1
-    keys, means, _ = pair_means(X, perturbation_idx * n_c + context_idx, rows, is_real)
+    keys, means, _ = pair_means(X, perturbation_idx * n_c + context_idx, rows)
     ctx = keys % n_c
     V = np.asarray(V, dtype=np.float64)
     Q = np.linalg.qr(V.T)[0]                                     # [G, d]
@@ -436,10 +279,6 @@ def jd_axes(
     W = E @ np.diag(ev ** -0.5) @ E.T
     U, _ = joint_diagonalize(np.stack([W @ S @ W for S in covs]))
     Bq = U.T @ np.linalg.inv(W)                                  # rows: programs in Q coordinates
-    if jitter:
-        S = np.random.default_rng(seed).normal(size=Bq.shape[:1] * 2)
-        S = (S - S.T) / 2
-        Bq = expm(jitter * S / np.linalg.norm(S, 2)) @ Bq
     B = Bq @ Q.T
     B /= np.linalg.norm(B, axis=1, keepdims=True)
     return (B @ np.linalg.pinv(V)).astype(np.float32)          # A0 with A0 V = B
@@ -448,7 +287,7 @@ def jd_axes(
 def response_embeddings(
     X: np.ndarray, perturbation_idx: np.ndarray, context_idx: np.ndarray,
     target_col: np.ndarray, rows: np.ndarray, n_perturbations: int, dim: int,
-    is_real: np.ndarray | None = None, seed: int = 0, scale: float = 0.02,
+    seed: int = 0, scale: float = 0.02,
 ) -> tuple[np.ndarray, np.ndarray]:
     """Perturbation embeddings from how each target gene responds.
 
@@ -466,7 +305,7 @@ def response_embeddings(
     from .data.noise import pair_means
     rows = np.nonzero(rows)[0] if np.asarray(rows).dtype == bool else np.asarray(rows)
     pair = perturbation_idx * (int(context_idx.max()) + 1) + context_idx
-    keys, means, _ = pair_means(X, pair, rows, is_real)
+    keys, means, _ = pair_means(X, pair, rows)
     pair_pert = keys // (int(context_idx.max()) + 1)
     col_of = np.full(n_perturbations, NO_MASK, dtype=np.int64)
     ok = target_col != NO_MASK
@@ -512,11 +351,8 @@ def fit(
     config: TrainConfig | None = None,
     train_rows: np.ndarray | None = None,
     val_rows: np.ndarray | None = None,
-    is_real: np.ndarray | None = None,
     on_eval: Callable[[int, Extract], None] | None = None,
-    synth_level: np.ndarray | None = None,
     subspace_basis: np.ndarray | None = None,
-    noise_model=None,
     context_embedding_init: np.ndarray | None = None,
 ) -> tuple[Extract, list[dict]]:
     """Fit the model. Returns ``(model, history)``.
@@ -529,57 +365,28 @@ def fit(
         common log-fold-change scale, and dividing by per-gene SD would remove
         exactly that and promote low-variance genes to equal footing.
 
-        The model sees only ``X`` and the labels. All measured rows of a pair
-        are exchangeable estimates of the same response: no cell counts, no
+        The model sees only ``X`` and the labels. All rows of a pair are
+        exchangeable estimates of the same response: no cell counts, no
         subsample index, and no row is treated as the most precise.
-    is_real
-        [n_rows] bool: is this row an actual *measured* response vector?
-        Defaults to all-True.
-    synth_level
-        [n_rows] fraction of genes shuffled in each synthetic row (NaN for
-        measured rows). Only reported, per level, in validation; training
-        treats every synthetic row alike.
-    on_eval
-        Called as ``on_eval(epoch, model)`` after every validation pass, before
-        the best state is restored. Used to snapshot ``B`` at each evaluation
-        so the epoch can be re-chosen afterwards under a different rule.
-
-        A training row carries two independent bits: whether ``x`` was
-        measured (``is_real``), and whether the label attached to it is its
-        own.
-
-        ``L_disc`` uses **every** row, through one head asking one question:
-        "is this response the result of this perturbation in this context?"
-        Measured rows with their own label are the positives. Both a measured
-        row under a permuted label and a synthetic row under its **assigned**
-        ``(p, c)`` are negatives. The synthetic row keeps the label it was
-        generated for, so the head cannot reject it on a label mismatch -- it
-        has to decide whether the vector is a plausible response for that
-        label, which is the harder and more informative negative.
-
-        ``L_recon`` is where the bits differ. Measured rows enter with a plus
-        sign whatever label they carry: a label-permuted negative is still a
-        real response vector, so ``B`` should reconstruct it. Synthetic rows
-        enter with a **minus** sign scaled by ``TrainConfig.recon_fake_weight``
-        (``0`` drops them entirely), so ``B`` is fitted only to genuinely
-        observed perturbation responses. Minimising a synthetic row's
-        reconstruction error would instead train ``B`` to span a
-        product-of-marginals cloud whose covariance is diagonal by
-        construction.
     train_rows, val_rows
-        Boolean masks over rows, from
-        :func:`extract.data.augment.make_split` at ``level="pair"``. All
-        eleven samples of a held-out ``(perturbation, context)`` move together,
-        so no pair appears in more than one half. ``None`` trains on
-        everything, which leaves no way to tell a model that found structure
-        from one that memorised -- pass a split.
+        Boolean masks over rows, split at the (perturbation, context) pair level
+        (:func:`extract.data.splits.split_val_per_perturbation`, or
+        :func:`extract.data.splits.make_split` for an in-memory table). All
+        rows of a held-out pair move together. ``None`` trains on everything.
 
-        **Validation, not test.** ``fit`` looks at ``val_rows`` repeatedly, for
-        early stopping. The test rows must not be passed here; score them once
-        with :func:`evaluate` after fitting.
+        **Validation, not test.** ``fit`` looks at ``val_rows`` repeatedly, to
+        choose the epoch. The test rows must not be passed here.
 
         The negative sampler is built from the **training rows only**, so a
         held-out pair is never named even as a negative.
+    on_eval
+        Called as ``on_eval(epoch, model)`` after every validation pass, before
+        the best state is restored. Used to snapshot ``B`` at each evaluation.
+    subspace_basis
+        A precomputed V [d, n_genes]; by default V is computed from the
+        training rows (``config.subspace_method``).
+    context_embedding_init
+        Starting context embeddings [n_contexts, context_embedding_dim].
     """
     config = config or TrainConfig()
     torch.manual_seed(config.seed)
@@ -619,66 +426,54 @@ def fit(
             f"{config.batch_size}"
         )
 
-    needs_basis = config.subspace in ("fixed", "anchored") or (
+    needs_basis = config.subspace == "fixed" or (
         config.subspace == "free" and config.free_init == "basis")
     if needs_basis and subspace_basis is None:
-        # the label-driven subspace, from the measured TRAINING rows only.
-        # is_real is validated here as well, since it is read before the
-        # general check further down.
-        if is_real is not None:
-            if len(np.asarray(is_real)) != n_rows:
-                raise ValueError(f"is_real has {len(np.asarray(is_real))} entries, X has {n_rows} rows")
-            if not np.asarray(is_real, dtype=bool).any():
-                raise ValueError("no real rows: L_recon would have nothing to fit")
+        # the subspace V, from the TRAINING rows only
         from .data.noise import (label_subspace_from_rows, pca_subspace_from_rows,
                                  rca_subspace_from_rows)
         if config.subspace_method not in ("rca", "snr", "pca"):
             raise ValueError(f"subspace_method must be 'rca', 'snr' or 'pca', got {config.subspace_method!r}")
-        if config.subspace_method == "pca" and config.subspace != "anchored":
+        if config.subspace_method == "pca":
             subspace_basis = pca_subspace_from_rows(
                 X, perturbation_idx, context_idx, train_idx, d=config.n_factors,
-                seed=config.seed, is_real=is_real)
+                seed=config.seed)
             what = "PCA of the pair means"
-        elif config.subspace_method == "rca" and config.subspace != "anchored":
+        elif config.subspace_method == "rca":
             subspace_basis = rca_subspace_from_rows(
                 X, perturbation_idx, context_idx, train_idx, d=config.n_factors,
-                rank=config.rca_rank, seed=config.seed, is_real=is_real)
+                rank=config.rca_rank, seed=config.seed)
             what = f"RCA, R_W rank {config.rca_rank}"
         else:
             subspace_basis, nm = label_subspace_from_rows(
                 X, perturbation_idx, context_idx, train_idx,
                 d=config.n_factors, rank=config.noise_rank,
-                max_rows=config.noise_max_rows, seed=config.seed, is_real=is_real)
-            noise_model = noise_model if noise_model is not None else nm
+                max_rows=config.noise_max_rows, seed=config.seed)
             what = f"signal/noise, noise rank {len(nm.s)}"
         if config.log_every:
-            print(f"label-driven subspace: d={config.n_factors} ({what}), from the "
+            print(f"subspace: d={config.n_factors} ({what}), from the "
                   f"training rows", flush=True)
 
+    if config.axes_init not in ("jd", "random"):
+        raise ValueError(f"axes_init must be 'jd' or 'random', got {config.axes_init!r}")
     axes0 = None
     if config.axes_init == "jd" and subspace_basis is not None:
         # (free mode with a random B has no axes to start: nothing to do)
-        axes0 = jd_axes(X, perturbation_idx, context_idx, train_idx, subspace_basis,
-                        is_real=is_real, jitter=config.axes_init_jitter, seed=config.seed)
-    elif config.axes_init_jitter:
-        raise ValueError("axes_init_jitter needs axes_init='jd'")
+        axes0 = jd_axes(X, perturbation_idx, context_idx, train_idx, subspace_basis)
     model = Extract(
         n_genes=n_genes,
         n_perturbations=n_perturbations,
         n_contexts=n_contexts,
         config=config,
         subspace_basis=subspace_basis,
-        noise_model=noise_model,
         axes0=axes0,
     ).to(device)
     if config.pert_embedding_init == "response":
-        if not isinstance(model.label_net, FactorizedLabelNet):
-            raise ValueError("pert_embedding_init='response' needs the MLP label model")
         if target_col is None:
             raise ValueError("pert_embedding_init='response' needs target_col (the target gene's column)")
         emb, has = response_embeddings(
             X, perturbation_idx, context_idx, np.asarray(target_col), train_idx,
-            n_perturbations, config.embedding_dim, is_real=is_real, seed=config.seed)
+            n_perturbations, config.embedding_dim, seed=config.seed)
         with torch.no_grad():
             w = model.label_net.perturbation_embedding.weight
             w[torch.from_numpy(has)] = torch.from_numpy(emb[has]).to(w)
@@ -686,8 +481,6 @@ def fit(
             print(f"perturbation embeddings: {int(has.sum())} of {n_perturbations} from "
                   f"target-gene responses", flush=True)
     if context_embedding_init is not None:
-        if not isinstance(model.label_net, FactorizedLabelNet):
-            raise ValueError("context_embedding_init needs the MLP label model")
         w = model.label_net.context_embedding.weight
         if tuple(np.shape(context_embedding_init)) != tuple(w.shape):
             raise ValueError(f"context_embedding_init must be {tuple(w.shape)}, "
@@ -698,7 +491,6 @@ def fit(
         raise ValueError(f"pert_embedding_init must be 'random' or 'response', "
                          f"got {config.pert_embedding_init!r}")
     model.subspace_basis_ = subspace_basis
-    model.noise_model_ = noise_model
 
     weights = dict(config.negative_weights or DEFAULT_WEIGHTS)
 
@@ -719,29 +511,19 @@ def fit(
     eval_sampler = _sampler(val_idx) if val_idx is not None else None
 
     w = np.ones(n_rows)                     # every row weighs the same
-    if is_real is None:
-        is_real = np.ones(n_rows, dtype=bool)
-    else:
-        is_real = np.asarray(is_real, dtype=bool)
-        if len(is_real) != n_rows:
-            raise ValueError(
-                f"is_real has {len(is_real)} entries, X has {n_rows} rows"
-            )
-        if not is_real.any():
-            raise ValueError("no real rows: L_recon would have nothing to fit")
 
     if config.coding not in ("ls", "group_lasso"):
         raise ValueError(f"coding must be 'ls' or 'group_lasso', got {config.coding!r}")
-    # one group per (perturbation, context, measured/synthetic): the rows that
-    # share a selection of programs under the group lasso
-    from .models.group_lasso import group_batches, group_keys
-    gkey = group_keys(perturbation_idx, context_idx, is_real)
+    # one group per (perturbation, context): the rows that share a selection
+    # of programs under the group lasso
+    from .models.group_lasso import group_batches, group_keys, group_penalty
+    from .models.loadings import collinearity_hinge, gene_concentration, gene_prior
+    gkey = group_keys(perturbation_idx, context_idx)
     gkey_t = torch.from_numpy(gkey).to(device)
     if config.coding == "group_lasso":
         model.loadings.renormalize_rows_()
     X_t = torch.from_numpy(X).to(device)
     w_t = torch.from_numpy(w.astype(np.float32)).to(device)
-    real_t = torch.from_numpy(is_real).to(device)
     p_all = torch.from_numpy(perturbation_idx).to(device)
     c_all = torch.from_numpy(context_idx).to(device)
     if target_col is None or config.no_mask:
@@ -757,49 +539,24 @@ def fit(
             {"params": list(model.label_net.parameters()),
              "weight_decay": config.label_weight_decay},
         ], lr=config.lr)
-        if config.weight_decay:
-            raise ValueError("weight_decay and label_weight_decay together are not supported")
     else:
-        optimiser = torch.optim.Adam(
-            model.parameters(), lr=config.lr, weight_decay=config.weight_decay
-        )
-
-    tc_disc = tc_opt = None
-    if config.tc_weight > 0:
-        tc_disc = TotalCorrelationDiscriminator(
-            config.n_factors, hidden=config.tc_hidden
-        ).to(device)
-        tc_opt = torch.optim.Adam(tc_disc.parameters(), lr=config.tc_lr)
-
-    # One negative per positive: |permuted| + |synthetic| == |positives|.
-    n_real_rows, n_synth_rows = int(is_real.sum()), int((~is_real).sum())
-    p_keep_perm = 1.0
-    if config.balance_negatives and n_synth_rows:
-        p_keep_perm = max(0.0, 1.0 - n_synth_rows / max(n_real_rows, 1))
-        print(
-            f"negative budget: {n_real_rows:,} positives | "
-            f"{n_synth_rows:,} synthetic + "
-            f"~{round(p_keep_perm * n_real_rows):,} permuted "
-            f"(keeping {p_keep_perm:.0%} of permuted draws)",
-            flush=True,
-        )
+        optimiser = torch.optim.Adam(model.parameters(), lr=config.lr, weight_decay=0.0)
 
     history: list[dict] = []
     best = {"score": None, "epoch": -1, "state": None}
-    since_best = 0
-    higher_is_better = config.select_on in ("accuracy", "auc")
 
     for epoch in range(config.epochs):
         model.train()
+        # drawn every epoch, also when the group lasso builds its own batches,
+        # so the random stream does not depend on the coding
         order = rng.permutation(len(train_idx))
-        totals = {"disc": 0.0, "recon": 0.0, "recon_measured": 0.0,
-                  "recon_synth": 0.0, "tc": 0.0, "sparsity": 0.0, "accuracy": 0.0}
+        totals = {"disc": 0.0, "recon": 0.0, "accuracy": 0.0}
         if config.coding == "group_lasso":
             totals.update(lasso_penalty=0.0, programs_per_pair=0.0)
         totals.update(gene_penalty=0.0, gene_top_share=0.0, distinct_penalty=0.0)
         n_batches = 0
         if config.coding == "group_lasso":
-            # batches of whole groups, so each pair's rows are solved together
+            # batches of whole pairs, so each pair's rows are solved together
             batches = group_batches(gkey[train_idx], config.batch_size, rng)
         else:
             batches = [order[s:s + config.batch_size] for s in range(0, len(train_idx), config.batch_size)]
@@ -814,125 +571,42 @@ def fit(
             cols = col_t[rows_t] if col_t is not None else None
             neg_p, neg_c = sampler.sample(local, rng)
 
-            z = model.project(x, cols, gkey_t[rows_t])        # eq. (4)
+            z = model.project(x, cols, gkey_t[rows_t])
             # the reconstruction term uses the raw lasso activities (the lasso
             # objective); the discriminator uses z
             z_rec = model.lasso_raw_ if config.coding == "group_lasso" else z
             neg_p_t = torch.from_numpy(neg_p).to(device)
             neg_c_t = torch.from_numpy(neg_c).to(device)
 
-            keep = real_t[rows_t]                 # measured rows
-            synth = ~keep                         # column-shuffled rows
-            all_real = bool(keep.all())
+            # ---- L_disc: each row under its own label (true) and under a
+            # swapped label (false), one of each per row
+            pos = model.score(z, p_all[rows_t], c_all[rows_t])
+            neg = model.score(z, neg_p_t, neg_c_t)
+            loss_d = contrastive_loss(pos, neg)
 
-            # ---- L_disc, eq. (9) -------------------------------------
-            # One head, one question: "is this response the result of this
-            # perturbation in this context?" Three kinds of row answer it:
-            #   measured x  + its own label       -> yes  (positive)
-            #   measured x  + a permuted label    -> no   (negative)
-            #   synthetic x + its ASSIGNED label  -> no   (negative)
-            # The synthetic row keeps the (p, c) it was generated for -- the
-            # label is real and correct, only the vector is not. That makes it
-            # the harder negative of the two: the head cannot reject it on a
-            # label mismatch, it has to judge whether the vector is a plausible
-            # response for that label at all.
-            if all_real:
-                pos = model.score(z, p_all[rows_t], c_all[rows_t])
-                neg = model.score(z, neg_p_t, neg_c_t)
-            else:
-                pos_l, neg_l = [], []
-                if bool(keep.any()):
-                    pos_l.append(model.score(z[keep], p_all[rows_t][keep],
-                                             c_all[rows_t][keep]))
-                    # Thin the permuted negatives so the two kinds together
-                    # match the positives one for one. `p_keep_perm` is derived
-                    # from the GLOBAL counts, not this batch, so the ratio is
-                    # stable batch to batch.
-                    kidx = torch.nonzero(keep, as_tuple=True)[0]
-                    if p_keep_perm < 1.0:
-                        take = torch.from_numpy(
-                            rng.random(len(kidx)) < p_keep_perm).to(device)
-                        kidx = kidx[take]
-                    if len(kidx):
-                        neg_l.append(model.score(z[kidx], neg_p_t[kidx],
-                                                 neg_c_t[kidx]))
-                if bool(synth.any()):
-                    neg_l.append(model.score(z[synth], p_all[rows_t][synth],
-                                             c_all[rows_t][synth]))
-                pos = torch.cat(pos_l) if pos_l else torch.zeros(0, device=device)
-                neg = torch.cat(neg_l) if neg_l else torch.zeros(0, device=device)
-            real, fake = pos, neg
-
-            loss_d = (
-                contrastive_loss(pos, neg)
-                if len(pos) and len(neg)
-                else torch.zeros((), device=device)
-            )
-
-            # ---- L_recon, eq. (10) -----------------------------------
-            # Measured rows enter with a plus sign, whatever label they carry.
-            # Synthetic rows enter with a MINUS sign scaled by
-            # `recon_fake_weight` (0 = not at all), so B is never fitted to a
-            # product-of-marginals cloud whose covariance is diagonal by
-            # construction.
-            def _sub_cols(m):
-                return cols[m] if cols is not None else None
-
-            if all_real:
-                per_row = model.loadings.squared_error(x, z_rec, cols)
-                loss_r = weighted_squared_error(per_row, w_t[rows_t])
-            elif bool(keep.any()):
-                per_row = model.loadings.squared_error(
-                    x[keep], z_rec[keep], _sub_cols(keep))
-                loss_r = weighted_squared_error(per_row, w_t[rows_t][keep])
-            else:
-                loss_r = torch.zeros((), device=device)
-            if config.coding == "group_lasso" and bool(keep.any()):
+            # ---- L_lasso: masked reconstruction error + group penalty
+            per_row = model.loadings.squared_error(x, z_rec, cols)
+            loss_r = weighted_squared_error(per_row, w_t[rows_t])
+            if config.coding == "group_lasso":
                 # the lasso objective 1/2 |r|^2 + lam * penalty, times 2 / (n G)
                 # to match the error term (a mean over rows of |r|^2 / G)
-                from .models.group_lasso import group_penalty
-                pen = 2.0 * group_penalty(z_rec[keep], gkey_t[rows_t][keep], config.lasso_lambda) / (
-                    int(keep.sum()) * x.shape[1])
+                gk = gkey_t[rows_t]
+                pen = 2.0 * group_penalty(z_rec, gk, config.lasso_lambda) / (len(rows) * x.shape[1])
                 loss_r = loss_r + pen
                 totals["lasso_penalty"] += float(pen)
-                sel = model.lasso_sel_[keep]
-                gk = gkey_t[rows_t][keep]
+                sel = model.lasso_sel_
                 first = torch.ones_like(gk, dtype=torch.bool)
                 srt, idx = torch.sort(gk)
                 first[idx[1:]] = srt[1:] != srt[:-1]
                 totals["programs_per_pair"] += float(sel[first].sum(1).float().mean())
 
-            # Keep the two halves as well as the combined term. The combined
-            # value is what is minimised and is the right single number to
-            # compare against val -- but it is NOT comparable across beta: at
-            # beta=0 it IS the measured error, at beta>0 it is a difference, so
-            # a lower value cannot distinguish "fits the real data better" from
-            # "fits the fakes worse". The guard on beta needs the measured half.
-            loss_r_measured = loss_r
-            loss_r_synth = torch.zeros((), device=device)
-            if bool(synth.any()):
-                per_row_f = model.loadings.squared_error(
-                    x[synth], z_rec[synth], _sub_cols(synth))
-                loss_r_synth = weighted_squared_error(
-                    per_row_f, w_t[rows_t][synth])
-                if config.recon_fake_weight:
-                    loss_r = loss_r - config.recon_fake_weight * loss_r_synth
+            loss = loss_d + config.alpha * loss_r
 
-            loss = loss_d + config.alpha * loss_r             # eq. (12)
-
-            loss_s = torch.zeros((), device=device)
-            if config.sparsity:
-                zf = z[keep]
-                if len(zf) > 1:
-                    loss_s = (zf.abs() / (zf.std(0) + 1e-8)).mean(0).sum()
-                    loss = loss + config.sparsity * loss_s
-
-            # gene-side prior on the programs: few genes per program, and
+            # ---- gene-side prior on the programs: few genes per program, and
             # programs kept distinct (no near-collinear pairs)
-            from .models.loadings import collinearity_hinge, gene_concentration, gene_prior
             Bcur = model.loadings.B
-            share = gene_concentration(Bcur, config.gene_topk)
-            loss_g = gene_prior(Bcur, config.gene_prior, config.gene_topk)
+            share = gene_concentration(Bcur, 200)
+            loss_g = gene_prior(Bcur)
             if config.gene_sparsity:
                 loss = loss + config.gene_sparsity * loss_g
             loss_c = collinearity_hinge(Bcur, config.distinct_tau)
@@ -942,11 +616,6 @@ def fit(
             totals["gene_top_share"] += float(share.mean())
             totals["distinct_penalty"] += float(loss_c)
 
-            loss_tc = torch.zeros((), device=device)
-            if tc_disc is not None:
-                loss_tc = tc_penalty(tc_disc, z)
-                loss = loss + config.tc_weight * loss_tc
-
             optimiser.zero_grad(set_to_none=True)
             loss.backward()
             if config.grad_clip:
@@ -955,34 +624,18 @@ def fit(
             if config.coding == "group_lasso":
                 model.loadings.renormalize_rows_()
 
-            if tc_disc is not None:
-                z_det = z.detach()
-                tc_loss = tc_discriminator_loss(
-                    tc_disc, z_det, shuffle_coordinates(z_det)
-                )
-                tc_opt.zero_grad(set_to_none=True)
-                tc_loss.backward()
-                tc_opt.step()
-
             totals["disc"] += float(loss_d)
             totals["recon"] += float(loss_r)
-            totals["recon_measured"] += float(loss_r_measured)
-            totals["recon_synth"] += float(loss_r_synth)
-            totals["tc"] += float(loss_tc)
-            totals["sparsity"] += float(loss_s)
-            totals["accuracy"] += discrimination_accuracy(real, fake)
+            totals["accuracy"] += discrimination_accuracy(pos, neg)
             n_batches += 1
 
         record = {
             "epoch": epoch,
             **{k: v / max(n_batches, 1) for k, v in totals.items()},
         }
-        # the quantity actually minimised, eq. (12). Logged so the epoch where
-        # val turns up while train keeps falling -- the overfitting onset -- is
-        # readable from one column rather than reconstructed from two.
-        # (recon already holds the lasso penalty under the group lasso)
+        # the quantity actually minimised (recon holds the lasso penalty under
+        # the group lasso)
         record["total"] = (record["disc"] + config.alpha * record["recon"]
-                           + config.sparsity * record["sparsity"]
                            + config.gene_sparsity * record["gene_penalty"]
                            + config.distinct_weight * record["distinct_penalty"])
         is_last = epoch == config.epochs - 1
@@ -1004,32 +657,23 @@ def fit(
                         np.random.default_rng(config.seed + 10_000 + epoch),
                         col_t,
                         w_t,
-                        is_real=is_real,
-                        recon_fake_weight=config.recon_fake_weight,
-                        synth_level=synth_level,
-                        perm_keep=p_keep_perm,
                     ).items()
                 }
             )
             # the training objective on the validation rows, term by term
-            from .models.loadings import collinearity_hinge, gene_concentration, gene_prior
             with torch.no_grad():
                 Bv = model.loadings.B
-                record["val_gene_penalty"] = float(gene_prior(Bv, config.gene_prior, config.gene_topk))
+                record["val_gene_penalty"] = float(gene_prior(Bv))
                 record["val_distinct_penalty"] = float(collinearity_hinge(Bv, config.distinct_tau))
-                record["val_gene_top_share"] = float(gene_concentration(Bv, config.gene_topk).mean())
+                record["val_gene_top_share"] = float(gene_concentration(Bv, 200).mean())
                 Bu = Bv / Bv.norm(dim=1, keepdim=True)
                 record["val_max_program_cos"] = float(((Bu @ Bu.T).abs() - torch.eye(len(Bu), device=Bu.device)).max())
             record["val_total"] = (record["val_disc_objective"]
-                                   + config.alpha * record.get("val_recon_objective", record["val_recon"])
-                                   + config.sparsity * record["val_sparsity"]
+                                   + config.alpha * record.get("val_lasso_objective", record["val_recon"])
                                    + config.gene_sparsity * record["val_gene_penalty"]
                                    + config.distinct_weight * record["val_distinct_penalty"])
-            score = record[f"val_{config.select_on}"]
-            improved = (
-                best["score"] is None
-                or (score > best["score"] if higher_is_better else score < best["score"])
-            )
+            score = record["val_auc"]
+            improved = best["score"] is None or score > best["score"]
             if improved:
                 best = {
                     "score": score,
@@ -1038,9 +682,6 @@ def fit(
                         k: v.detach().clone() for k, v in model.state_dict().items()
                     },
                 }
-                since_best = 0
-            else:
-                since_best += 1
             record["val_best"] = improved
             if on_eval is not None:
                 on_eval(epoch, model)
@@ -1053,24 +694,12 @@ def fit(
             )
             if "val_accuracy" in record:
                 line += (
-                    f"   | val acc {record['val_accuracy']:.3f}  "
+                    f"   | val auc {record['val_auc']:.3f}  acc {record['val_accuracy']:.3f}  "
                     f"recon {record['val_recon']:.4f}  "
                     f"r {record['val_span_residual_median']:.3f}"
-                    + (f"  synth acc {record['val_synth_accuracy']:.3f}"
-                       if record.get("val_n_synthetic") else "")
-                    + f"{'  *best' if record.get('val_best') else ''}"
+                    f"{'  *best' if record.get('val_best') else ''}"
                 )
             print(line, flush=True)
-
-        if (config.patience and since_best >= config.patience
-                and epoch + 1 >= config.min_epochs):
-            print(
-                f"early stop at epoch {epoch}: no val {config.select_on} "
-                f"improvement in {since_best} evaluations "
-                f"(best {best['score']:.4f} at epoch {best['epoch']})",
-                flush=True,
-            )
-            break
 
     # the last epoch's parameters, kept before the best ones are restored
     model.final_state_ = {k: v.detach().cpu().clone() for k, v in model.state_dict().items()}
@@ -1080,7 +709,7 @@ def fit(
         model.load_state_dict(best["state"])
         print(
             f"restored parameters from epoch {best['epoch']} "
-            f"(val {config.select_on} {best['score']:.4f})",
+            f"(val auc {best['score']:.4f})",
             flush=True,
         )
         for rec in history:
@@ -1100,56 +729,37 @@ def evaluate(
     rng: np.random.Generator,
     target_col: torch.Tensor | None = None,
     row_weights: torch.Tensor | None = None,
-    is_real: np.ndarray | None = None,
-    recon_fake_weight: float = 0.0,
     batch_size: int = 2048,
-    synth_level: np.ndarray | None = None,
-    perm_keep: float = 1.0,
 ) -> dict:
     """Metrics on held-out rows, scored exactly as training scores them.
 
-    ``is_real`` [n_rows of X] marks measured rows; ``None`` means all measured.
-    Measured rows under their own label are the positives. Measured rows under
-    a permuted label, and synthetic rows under their **own** label, are the
-    two kinds of negative. Synthetic rows are never positives and never enter
-    ``recon`` or the span residual.
+    Each row is scored under its own label (a positive) and under one swapped
+    label drawn by ``sampler`` (a negative).
 
-    What each number is testing:
-
-    ``accuracy`` / ``disc``
-        Measured rows under their own label vs a permuted one. Both ``p`` and
-        ``c`` were seen in training but *never together*, so this is the
-        interaction test. **A lookup table scores at chance here** -- this is
-        the number that separates a model which found structure from one that
-        memorised the training pairs. Synthetic rows do not enter it, so it is
-        comparable between runs with and without them.
-    ``synth_accuracy`` / ``disc_synth``
-        Measured rows vs synthetic rows, each under its own label: can the
-        model tell a real response from a marginal-matched fake one? Balanced,
-        i.e. the mean of positive and synthetic-negative accuracy. ``NaN``
-        when no synthetic rows are present.
+    ``auc`` / ``accuracy`` / ``disc``
+        True vs swapped labels. Both ``p`` and ``c`` of a validation pair were
+        seen in training but *never together*, so this is the interaction test:
+        **a lookup table scores at chance here**. ``auc`` (rank-based) picks the
+        epoch.
+    ``disc_objective``
+        The discriminator loss as training minimises it: mean BCE of the
+        positives + mean BCE of the negatives.
     ``recon``
-        Precision-weighted masked squared error on measured rows, comparable
-        to the training ``recon`` directly.
+        Masked squared error per gene of the activities the discriminator sees.
+    ``lasso_objective`` / ``programs_per_pair``
+        Under the group lasso: the reconstruction term as training minimises it
+        (raw lasso activities, plus the penalty), and how many programs a pair
+        selects.
     ``span_residual_median`` / ``_q90``
-        ``||x - x B^+ B|| / ||x||`` on measured held-out rows -- eq. (14).
-        Large values mean the held-out pairs need programs outside
-        ``span(B)``, the one failure mode the architecture cannot absorb.
-    ``synth_accuracy_f<x>`` / ``recon_synth_f<x>``
-        With ``synth_level`` [n_rows of X] (the fraction of genes shuffled in
-        each synthetic row), the two synthetic metrics again for the synthetic
-        rows of each level: a difficulty curve, from barely altered rows (small
-        fraction) to fully shuffled ones (1.0).
-    ``real_score_mean`` / ``fake_score_mean`` / ``synth_score_mean``
-        The raw logits. A collapsed head shows up here as both near zero even
-        when accuracy looks acceptable.
+        ``||x - x B^+ B|| / ||x||``: do the held-out pairs need programs outside
+        ``span(B)``?
+    ``real_score_mean`` / ``fake_score_mean``
+        The raw logits; a collapsed head shows up as both near zero.
     """
     was_training = model.training
     model.eval()
-    # Take the device from the MODEL, not from X_t. A caller may keep the full
-    # matrix on the CPU on purpose (it is ~11 GB here) and let batches move; if
-    # we read the device off X_t instead, a CUDA model gets CPU batches and the
-    # first matmul raises.
+    # Take the device from the MODEL, not from X_t: a caller may keep the full
+    # matrix on the CPU on purpose and let batches move.
     device = next(model.parameters()).device
     src = X_t.device
     rows = np.asarray(rows, dtype=np.int64)
@@ -1163,184 +773,93 @@ def evaluate(
             f"{len(rows)} were passed; sample() indexes the sampler's own "
             "rows, so the two must correspond one-to-one"
         )
-
-    real_rows = (
-        np.ones(len(rows), dtype=bool)
-        if is_real is None
-        else np.asarray(is_real, dtype=bool)[rows]
-    )
-    if not real_rows.any():
-        raise ValueError("no measured rows to evaluate")
-
+    if not len(rows):
+        raise ValueError("no rows to evaluate")
 
     def _bce_sum(logits: torch.Tensor, target: float) -> float:
         return float(F.binary_cross_entropy_with_logits(
             logits, torch.full_like(logits, target), reduction="sum"))
 
-    # Accumulated as sums and counts, so batches with few measured rows weigh
-    # exactly as much as their rows do.
-    t = dict.fromkeys(
-        ["pos_ok", "pos_bce", "pos_sum", "perm_ok", "perm_bce", "perm_sum",
-         "syn_ok", "syn_bce", "syn_sum", "wsq", "w",
-         "wsq_syn", "w_syn"], 0.0)
-    n_pos = n_syn = 0
+    # Accumulated as sums and counts, so every row weighs the same.
+    t = dict.fromkeys(["pos_ok", "pos_bce", "pos_sum", "perm_ok", "perm_bce", "perm_sum",
+                       "wsq", "w"], 0.0)
+    n_pos = 0
     residuals = []
-    pos_all, perm_all, syn_all, syn_lv, z_real = [], [], [], [], []
-    lv_all = (np.asarray(synth_level, dtype=float) if synth_level is not None else None)
-    per_level: dict[float, list[float]] = {}     # level -> [ok, n, wsq, w]
+    pos_all, perm_all = [], []
     lasso = model.config.coding == "group_lasso"
     if lasso:
         from .models.group_lasso import group_batches, group_keys, group_penalty
-        gkey = group_keys(perturbation_idx[rows], context_idx[rows], real_rows)
+        gkey = group_keys(perturbation_idx[rows], context_idx[rows])
         batches = group_batches(gkey, batch_size)
-        t.update(lasso_raw_sq=0.0, lasso_pen=0.0, n_groups=0.0, n_programs=0.0, lasso_raw_sq_syn=0.0)
+        t.update(lasso_raw_sq=0.0, lasso_pen=0.0, n_groups=0.0, n_programs=0.0)
     else:
         batches = [np.arange(s, min(s + batch_size, len(rows)))
                    for s in range(0, len(rows), batch_size)]
 
     for local in batches:
-        keep = real_rows[local]
-        local_real, local_syn = local[keep], local[~keep]
+        idx = rows[local]
+        idx_t = torch.from_numpy(idx).to(src)
+        x = X_t[idx_t].to(device)
+        cols = (target_col[idx_t].to(device)
+                if target_col is not None else None)
+        z = model.project(x, cols, torch.from_numpy(gkey[local]).to(device)
+                          if lasso else None)
+        if lasso:
+            g_t = torch.from_numpy(gkey[local]).to(device)
+            t["lasso_raw_sq"] += float(model.loadings.squared_error(x, model.lasso_raw_, cols).sum())
+            t["lasso_pen"] += float(group_penalty(model.lasso_raw_, g_t, model.config.lasso_lambda))
+            _, first = np.unique(gkey[local], return_index=True)
+            t["n_groups"] += len(first)
+            t["n_programs"] += float(model.lasso_sel_[torch.from_numpy(first).to(device)].sum())
+        pos = model.score(
+            z,
+            torch.from_numpy(perturbation_idx[idx]).to(device),
+            torch.from_numpy(context_idx[idx]).to(device),
+        )
+        neg_p, neg_c = sampler.sample(local, rng)
+        perm = model.score(
+            z,
+            torch.from_numpy(neg_p).to(device),
+            torch.from_numpy(neg_c).to(device),
+        )
+        t["pos_ok"] += float((pos > 0).sum())
+        t["pos_bce"] += _bce_sum(pos, 1.0)
+        t["pos_sum"] += float(pos.sum())
+        t["perm_ok"] += float((perm <= 0).sum())
+        t["perm_bce"] += _bce_sum(perm, 0.0)
+        t["perm_sum"] += float(perm.sum())
+        pos_all.append(pos.cpu().numpy()); perm_all.append(perm.cpu().numpy())
 
-        if len(local_real):
-            idx = rows[local_real]
-            idx_t = torch.from_numpy(idx).to(src)
-            x = X_t[idx_t].to(device)
-            cols = (target_col[idx_t].to(device)
-                    if target_col is not None else None)
-            z = model.project(x, cols, torch.from_numpy(gkey[local_real]).to(device)
-                              if lasso else None)
-            if lasso:
-                g_t = torch.from_numpy(gkey[local_real]).to(device)
-                t["lasso_raw_sq"] += float(model.loadings.squared_error(x, model.lasso_raw_, cols).sum())
-                t["lasso_pen"] += float(group_penalty(model.lasso_raw_, g_t, model.config.lasso_lambda))
-                _, first = np.unique(gkey[local_real], return_index=True)
-                t["n_groups"] += len(first)
-                t["n_programs"] += float(model.lasso_sel_[torch.from_numpy(first).to(device)].sum())
-            pos = model.score(
-                z,
-                torch.from_numpy(perturbation_idx[idx]).to(device),
-                torch.from_numpy(context_idx[idx]).to(device),
-            )
-            neg_p, neg_c = sampler.sample(local_real, rng)
-            perm = model.score(
-                z,
-                torch.from_numpy(neg_p).to(device),
-                torch.from_numpy(neg_c).to(device),
-            )
-            t["pos_ok"] += float((pos > 0).sum())
-            t["pos_bce"] += _bce_sum(pos, 1.0)
-            t["pos_sum"] += float(pos.sum())
-            t["perm_ok"] += float((perm <= 0).sum())
-            t["perm_bce"] += _bce_sum(perm, 0.0)
-            t["perm_sum"] += float(perm.sum())
-            pos_all.append(pos.cpu().numpy()); perm_all.append(perm.cpu().numpy())
-            z_real.append(z.cpu().numpy())
-
-            per_row = model.loadings.squared_error(x, z, cols)
-            w = (row_weights[idx_t].to(device) if row_weights is not None
-                 else torch.ones_like(per_row))
-            t["wsq"] += float((per_row * w).sum())
-            t["w"] += float(w.sum())
-            residuals.append(model.loadings.span_residual(x, cols).cpu().numpy())
-            n_pos += len(idx)
-
-        if len(local_syn):
-            idx = rows[local_syn]
-            idx_t = torch.from_numpy(idx).to(src)
-            cols = (target_col[idx_t].to(device)
-                    if target_col is not None else None)
-            z = model.project(X_t[idx_t].to(device), cols,
-                              torch.from_numpy(gkey[local_syn]).to(device) if lasso else None)
-            if lasso:
-                t["lasso_raw_sq_syn"] += float(model.loadings.squared_error(
-                    X_t[idx_t].to(device), model.lasso_raw_, cols).sum())
-            syn = model.score(                     # its OWN label: a negative
-                z,
-                torch.from_numpy(perturbation_idx[idx]).to(device),
-                torch.from_numpy(context_idx[idx]).to(device),
-            )
-            t["syn_ok"] += float((syn <= 0).sum())
-            t["syn_bce"] += _bce_sum(syn, 0.0)
-            t["syn_sum"] += float(syn.sum())
-            syn_all.append(syn.cpu().numpy())
-            syn_lv.append(lv_all[idx] if lv_all is not None else np.full(len(idx), np.nan))
-            per_row_s = model.loadings.squared_error(
-                X_t[idx_t].to(device), z, cols)
-            w_s = (row_weights[idx_t].to(device) if row_weights is not None
-                   else torch.ones_like(per_row_s))
-            t["wsq_syn"] += float((per_row_s * w_s).sum())
-            t["w_syn"] += float(w_s.sum())
-            n_syn += len(idx)
-            if lv_all is not None:
-                lv = lv_all[idx]
-                ok = (syn <= 0).cpu().numpy(); sq = (per_row_s * w_s).cpu().numpy()
-                ww = w_s.cpu().numpy()
-                for f in np.unique(lv[~np.isnan(lv)]):
-                    at = lv == f
-                    acc = per_level.setdefault(float(f), [0.0, 0.0, 0.0, 0.0])
-                    acc[0] += float(ok[at].sum()); acc[1] += float(at.sum())
-                    acc[2] += float(sq[at].sum()); acc[3] += float(ww[at].sum())
+        per_row = model.loadings.squared_error(x, z, cols)
+        w = (row_weights[idx_t].to(device) if row_weights is not None
+             else torch.ones_like(per_row))
+        t["wsq"] += float((per_row * w).sum())
+        t["w"] += float(w.sum())
+        residuals.append(model.loadings.span_residual(x, cols).cpu().numpy())
+        n_pos += len(idx)
 
     model.train(was_training)
     r = np.concatenate(residuals)
-    nan = float("nan")
     from sklearn.metrics import roc_auc_score
     P, N = np.concatenate(pos_all), np.concatenate(perm_all)
-    auc = lambda a, b: float(roc_auc_score(np.r_[np.ones(len(a)), np.zeros(len(b))], np.r_[a, b]))
-    aucs = {"auc": auc(P, N)}
-    if syn_all:
-        S, L = np.concatenate(syn_all), np.concatenate(syn_lv)
-        aucs["auc_synth"] = auc(P, S)
-        for f in np.unique(L[~np.isnan(L)]):
-            aucs[f"auc_synth_f{f:g}"] = auc(P, S[L == f])
-    Z = np.concatenate(z_real)
-    # the sparsity term exactly as training computes it, over the measured rows
-    val_sparsity = float((np.abs(Z) / (Z.std(0, ddof=1) + 1e-8)).mean(0).sum()) if len(Z) > 1 else nan
+    out = {"auc": float(roc_auc_score(np.r_[np.ones(len(P)), np.zeros(len(N))], np.r_[P, N]))}
     if lasso:
         n_genes = X_t.shape[1]
-        aucs["programs_per_pair"] = t["n_programs"] / max(t["n_groups"], 1)
+        out["programs_per_pair"] = t["n_programs"] / max(t["n_groups"], 1)
         # the lasso objective per row and gene, as in training (squared_error
         # is the per-row mean over genes)
-        aucs["lasso_objective"] = (t["lasso_raw_sq"] + 2.0 * t["lasso_pen"] / n_genes) / max(n_pos, 1)
-        # the reconstruction term exactly as training minimises it: the lasso
-        # objective of the measured rows minus beta x the raw error of the
-        # synthetic rows
-        aucs["recon_objective"] = aucs["lasso_objective"] - recon_fake_weight * (
-            t["lasso_raw_sq_syn"] / n_syn if n_syn else 0.0)
+        out["lasso_objective"] = (t["lasso_raw_sq"] + 2.0 * t["lasso_pen"] / n_genes) / max(n_pos, 1)
     return {
-        **aucs,
-        "sparsity": val_sparsity,
+        **out,
         "n_rows": int(n_pos),
-        "n_synthetic": int(n_syn),
         "accuracy": (t["pos_ok"] + t["perm_ok"]) / (2 * n_pos),
         "disc": (t["pos_bce"] + t["perm_bce"]) / n_pos,
-        "synth_accuracy": (
-            0.5 * (t["pos_ok"] / n_pos + t["syn_ok"] / n_syn) if n_syn else nan
-        ),
-        "disc_synth": (
-            t["pos_bce"] / n_pos + t["syn_bce"] / n_syn if n_syn else nan
-        ),
-        # the discriminator loss exactly as training minimises it: mean BCE of
-        # the positives + mean BCE of the negatives, the permuted ones kept at
-        # the training share ``perm_keep`` alongside the synthetic ones
-        "disc_objective": (t["pos_bce"] / n_pos
-                           + (perm_keep * t["perm_bce"] + t["syn_bce"])
-                           / max(perm_keep * n_pos + n_syn, 1e-12)),
-        "recon_measured": t["wsq"] / max(t["w"], 1e-12),
-        "recon_synth": (t["wsq_syn"] / t["w_syn"]) if t["w_syn"] else nan,
-        # the combined objective, the same quantity training minimises
-        "recon": (t["wsq"] / max(t["w"], 1e-12)
-                  - recon_fake_weight * (t["wsq_syn"] / t["w_syn"]
-                                         if t["w_syn"] else 0.0)),
+        "disc_objective": t["pos_bce"] / n_pos + t["perm_bce"] / n_pos,
+        "recon": t["wsq"] / max(t["w"], 1e-12),
         "real_score_mean": t["pos_sum"] / n_pos,
         "fake_score_mean": t["perm_sum"] / n_pos,
-        "synth_score_mean": t["syn_sum"] / n_syn if n_syn else nan,
         "span_residual_median": float(np.median(r)),
         "span_residual_q90": float(np.quantile(r, 0.90)),
-        **{k: v for f, (ok, n, wsq, w) in sorted(per_level.items()) for k, v in (
-            (f"synth_accuracy_f{f:g}", 0.5 * (t["pos_ok"] / n_pos + ok / n)),
-            (f"recon_synth_f{f:g}", wsq / w if w else nan))},
     }
 
 

@@ -1,26 +1,33 @@
 #!/usr/bin/env python3
-"""The single test read -- the only place test metrics are printed.
+"""The single test read -- the only place the test partition is opened.
 
-Selection is done on validation (``summarise_sweep.py`` -> ``best_configs.csv``,
-which carries no test columns). Once a configuration is chosen, run this for
-it. Test numbers were recorded for every cell by the sweep, at the epoch
-validation selected, so nothing is refitted.
+Configurations are chosen on validation only. Once one is chosen, run this for
+it: it loads the saved model (the epoch validation selected), scores every test
+row under its own label and under a swapped label, and prints the metrics.
+Nothing is refitted.
 
 Every read is appended to ``<sweep>/TEST_READS.log`` with a timestamp. Test is
 meant to be read once; the log makes a second read visible rather than silent,
-and this script refuses a repeat unless ``--again`` is given, so a re-read is a
-decision and not an accident. A test number obtained after choosing among
-configs by their test scores is no longer an unbiased estimate.
+and this script refuses a repeat unless ``--again`` is given. A test number
+obtained after choosing among configurations by their test scores is no longer
+an unbiased estimate.
 
-    python scripts/read_test.py <sweep_dir> --tag d4_a1000_b0_K1_seed0
+    python scripts/read_test.py <sweep_dir> --tag <tag> --reason "chosen on val AUC"
 """
 from __future__ import annotations
-import argparse, datetime, getpass
+import argparse, datetime, getpass, json, sys
 from pathlib import Path
-import pandas as pd
 
-SHOW = ["disc", "recon_measured", "recon_synth", "accuracy",
-        "synth_accuracy", "span_residual_median"]
+import numpy as np
+import torch
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
+from extract.data.splits import load_partition
+from extract.objectives import StratifiedNegativeSampler
+from extract.train import evaluate, load_model, prepare
+
+SHOW = ["auc", "accuracy", "disc", "recon", "lasso_objective", "programs_per_pair",
+        "span_residual_median"]
 
 
 def main() -> int:
@@ -33,6 +40,7 @@ def main() -> int:
                     help="why these configs -- recorded in the log")
     ap.add_argument("--again", action="store_true",
                     help="allow a read when test has been read before")
+    ap.add_argument("--device", default="cpu")
     args = ap.parse_args()
 
     log = args.sweep_dir / "TEST_READS.log"
@@ -42,21 +50,30 @@ def main() -> int:
         for line in prior:
             print(f"  {line}")
         raise SystemExit("refusing a repeat read; pass --again if this is deliberate")
-
-    m = pd.read_csv(args.sweep_dir / "sweep_metrics.csv")
-    rows = m[m.tag.isin(args.tag)]
-    missing = sorted(set(args.tag) - set(rows.tag))
+    missing = [t for t in args.tag if not (args.sweep_dir / f"config_{t}.json").exists()]
     if missing:
-        raise SystemExit(f"not in sweep_metrics.csv: {missing}")
-    rows = rows.drop_duplicates("tag", keep="last")
+        raise SystemExit(f"no saved model for: {missing}")
 
-    cols = ["tag"]
-    for k in SHOW:
-        for sp in ("val", "test"):
-            c = f"{sp}_{k}"
-            if c in rows:
-                cols.append(c)
-    print(rows[cols].to_string(index=False))
+    cache = {}
+    for tag in args.tag:
+        cfg = json.loads((args.sweep_dir / f"config_{tag}.json").read_text())
+        split = cfg["split_dir"]
+        if split not in cache:
+            cache[split] = load_partition(split, "test", None)
+        Xte, mte, genes = cache[split]
+        plev, clev = np.load(args.sweep_dir / f"levels_{tag}.npy", allow_pickle=True)
+        fa = prepare(Xte, mte, genes, perturbation_levels=plev, context_levels=clev)
+        model = load_model(args.sweep_dir, tag, "best", device=args.device)
+        rows = np.arange(len(mte))
+        sampler = StratifiedNegativeSampler(
+            perturbation_idx=fa["perturbation_idx"], context_idx=fa["context_idx"],
+            stratum=np.zeros(len(rows), dtype=np.int64),
+            n_perturbations=len(plev), n_contexts=len(clev),
+            weights={"same_s_other_pert": 0.5, "same_s_other_context": 0.5})
+        m = evaluate(model, torch.from_numpy(fa["X"]), fa["perturbation_idx"], fa["context_idx"],
+                     rows, sampler, np.random.default_rng(12345),
+                     torch.from_numpy(fa["target_col"]), None)
+        print(f"{tag}\n  " + "  ".join(f"test_{k} {m[k]:.4f}" for k in SHOW if k in m))
 
     stamp = datetime.datetime.now().isoformat(timespec="seconds")
     with open(log, "a") as fh:

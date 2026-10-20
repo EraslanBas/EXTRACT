@@ -1,57 +1,14 @@
-"""Precision-weighted, on-target-masked reconstruction -- eq. (10).
+"""On-target-masked reconstruction error, averaged over rows.
 
-    L_recon = sum_i w_i * || m_i * (x_i - z_i B) ||^2 / n_kept,   w_i ~ n_cells
-
-This term is load-bearing in a specific way. A tied linear autoencoder trained
-on reconstruction alone recovers the top-d **principal subspace** and nothing
-more -- the span is determined, the orientation inside it is not (Baldi &
-Hornik, 1989). So ``L_recon`` picks *which subspace* the factors live in and
-``L_disc`` picks *their orientation inside it*. Drop the discriminator and this
-is PCA with extra steps; drop this term and the contrastive objective will
-happily choose a direction explaining 0.01% of the variance because it separates
-two contexts cleanly, whose loading vector is then not a gene program.
-
-The precision weight is the payoff of building eleven rows per perturbation.
-Unweighted, a 50-cell row counts as much as a 3,275-cell one, while the spread
-of those estimates falls from 0.042 to 0.0049 across that range.
+The per-row error (``GlobalLoadings.squared_error``) is the masked squared
+residual divided by the number of retained genes; this averages it over a
+batch's rows. Every row weighs the same: all rows of a pair are exchangeable,
+and the model never uses cell counts.
 """
 
 from __future__ import annotations
 
-import numpy as np
 import torch
-
-
-def precision_weights(
-    n_cells: np.ndarray, scheme: str = "linear", clip_quantile: float = 0.99
-) -> np.ndarray:
-    """Row weights from cell counts, normalised to mean 1.
-
-    Parameters
-    ----------
-    scheme
-        ``"linear"`` gives ``w ~ n_cells``, which is what the spec states and
-        what the variance of a mean implies. ``"sqrt"`` is the gentler
-        alternative for when a handful of very deep perturbations dominate the
-        gradient; ``"uniform"`` disables weighting, for ablation.
-    clip_quantile
-        Cap before normalising, so one outlier perturbation cannot own the
-        batch. Set to 1.0 to disable.
-    """
-    n = np.asarray(n_cells, dtype=np.float64)
-    if np.any(n <= 0):
-        raise ValueError("n_cells must be positive")
-    if scheme == "linear":
-        w = n
-    elif scheme == "sqrt":
-        w = np.sqrt(n)
-    elif scheme == "uniform":
-        w = np.ones_like(n)
-    else:
-        raise ValueError(f"unknown scheme: {scheme!r}")
-    if clip_quantile < 1.0:
-        w = np.minimum(w, np.quantile(w, clip_quantile))
-    return w / w.mean()
 
 
 def weighted_squared_error(
