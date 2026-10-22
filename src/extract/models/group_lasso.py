@@ -76,14 +76,12 @@ def group_lasso_codes(
     return Z, sel_rows
 
 
-def group_keys(perturbation_idx, context_idx, is_real=None):
-    """[n] int64 group ids: one group per (perturbation, context) pair, with
-    the measured and the synthetic rows of a pair in separate groups."""
+def group_keys(perturbation_idx, context_idx):
+    """[n] int64 group ids: one group per (perturbation, context) pair."""
     import numpy as np
     p = np.asarray(perturbation_idx, dtype=np.int64)
     c = np.asarray(context_idx, dtype=np.int64)
-    real = np.ones(len(p), bool) if is_real is None else np.asarray(is_real, bool)
-    return (p * (int(c.max()) + 1 if len(c) else 1) + c) * 2 + (~real).astype(np.int64)
+    return p * (int(c.max()) + 1 if len(c) else 1) + c
 
 
 def group_batches(keys, batch_size, rng=None):

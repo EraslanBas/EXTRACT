@@ -1,26 +1,21 @@
-"""Real-vs-permuted-label discrimination, and the stratified negative sampler.
+"""True-vs-swapped-label discrimination, and the negative sampler.
 
-A negative replaces the ``(perturbation, context)`` label of a real observation.
+A negative replaces the ``(perturbation, context)`` label of a measured row.
 **The observation vector itself is never altered** -- whole rows move as units,
-so the marginal law of ``x`` is preserved exactly and the only way to win the
-discrimination is to model the dependence between ``x`` and ``u``.
+so the distribution of ``x`` is the same for true and false examples and the
+only way to win the discrimination is to model the dependence between ``x``
+and ``u``. With label swaps as the only negatives the optimal classifier is the
+density ratio ``log p(x, u) / (p(x) p(u))``, which is the form the
+per-component head is built for (``models.heads``).
 
-Why stratify
-------------
-Naive permutation is solved by precision rather than biology. The noise scale of
-``x`` encodes ``n_cells``, and ``n_cells`` is tied to perturbation identity, so
-a discriminator can separate real from permuted pairs by reading off effect-size
-scale and never look at structure. Drawing the negative from the same subsample
-stratum holds precision roughly fixed across the swap: measured on the built
-matrices the median ``|log2(n_real / n_neg)|`` falls from **1.748** unstratified
-to **0.617** stratified.
+Every drawn label is a pair observed among the sampler's own rows, so a sampler
+built from training rows never names a validation or test pair. All rows of a
+pair are exchangeable: ``fit`` passes a single stratum, so no row type (full
+data or pseudobulk) is matched to another and no cell counts are used.
 
-Do not shuffle values *inside* the expression vector. That destroys the gene
-marginals, and per-gene SD spans ~5.4e4x on these matrices, so a single
-threshold then separates real from shuffled: separability is d = 0.59 for
-within-row shuffling against d = 0.00 for column shuffling.
-
-See the method paper sections 4.1 and 6.
+Do not shuffle values *inside* the expression vector: that destroys the gene
+marginals and asks a different question (is this a plausible response at
+all?), whose optimal classifier is not of the head's form.
 """
 
 from __future__ import annotations
@@ -31,10 +26,8 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 
-#: The two strategies of the spec. Names match
-#: :data:`extract.data.augment.STRATEGIES` so a sampled negative and a
-#: pre-built augmented table mean the same thing. No strategy assumes a
-#: reference context (vehicle, untreated): contexts are symmetric.
+#: The two swap strategies, half of the negatives each by default. No strategy
+#: assumes a reference context (vehicle, untreated): contexts are symmetric.
 STRATEGIES = ("same_s_other_pert", "same_s_other_context")
 
 DEFAULT_WEIGHTS = {
@@ -45,27 +38,30 @@ DEFAULT_WEIGHTS = {
 
 @dataclass
 class StratifiedNegativeSampler:
-    """Draw permuted labels within a subsample stratum.
+    """Draw swapped labels, each naming a pair observed among the given rows.
 
-    Built from the full label arrays so the pools can be precomputed once; the
-    per-batch draw is then a handful of fancy-index operations.
+    Built from the label arrays of the rows it serves, so the pools can be
+    precomputed once; the per-batch draw is then a handful of fancy-index
+    operations.
 
     Parameters
     ----------
     perturbation_idx, context_idx, stratum
-        [n_rows] each. ``stratum`` is the subsample index ``s`` in ``0..10``
-        (0 = the full-data row), i.e. the sample's precision tier.
+        [n_rows] each. Draws prefer a label from the same ``stratum``; ``fit``
+        passes all zeros (the rows of a pair are exchangeable), so the
+        stratum has no effect there.
     weights
         Mixture over :data:`STRATEGIES`.
 
     Strategies, and what each one forces the model to learn:
 
     ``same_s_other_pert``
-        ``A1BG__sub03 -> BRCA1__sub03``. Same context, same stratum, different
-        perturbation. Forces perturbation identity.
+        Same context, different perturbation (observed in that context).
+        Forces perturbation identity.
     ``same_s_other_context``
-        ``A1BG__sub03`` under a different context. Forces the interaction
-        ``delta_pc``. Unavailable with a single context; give it zero weight.
+        Same perturbation, different context (in which it was observed).
+        Forces the interaction. Unavailable with a single context; then the
+        other axis is swapped.
     """
 
     perturbation_idx: np.ndarray
@@ -185,23 +181,14 @@ class StratifiedNegativeSampler:
         n_cells: np.ndarray,
         neg_stratum: np.ndarray | None = None,
     ) -> np.ndarray:
-        """``|log2(n_real / n_neg)|`` per draw -- the diagnostic that justifies
-        stratification.
+        """``|log2(n_real / n_neg)|`` per draw: how different the cell counts of
+        the true and the swapped label are (a diagnostic; not used in training).
 
         ``n_neg`` is the cell count of the row the *negative label* would name
-        at the drawn row's own stratum, i.e. ``(neg_p, neg_c, s)``. Comparing
-        instead against a perturbation's depth pooled over strata erases the
-        very thing stratification fixes, and reports ~1.0 for draws that are in
-        fact well matched.
-
-        Median should sit near 0.6 on the real matrices; near 1.7 means the
-        draws are effectively unstratified and the discriminator has a shortcut
-        through noise scale. ``NaN`` marks a negative naming a
-        ``(p, c, s)`` combination that was never observed.
-
-        Pass ``neg_stratum`` to score a hypothetical sampler that ignores the
-        stratum -- that is how the unstratified baseline is computed, and it is
-        the only way to reproduce the 1.748 figure from these matrices.
+        at the drawn row's own stratum, i.e. ``(neg_p, neg_c, s)``. ``NaN``
+        marks a negative naming a ``(p, c, s)`` combination that was never
+        observed. Pass ``neg_stratum`` to score a hypothetical sampler that
+        ignores the stratum.
         """
         rows = np.asarray(rows, dtype=np.int64)
         n_cells = np.asarray(n_cells, dtype=np.float64)
@@ -272,7 +259,7 @@ def _draw_excluding(
 def contrastive_loss(
     real_logits: torch.Tensor, fake_logits: torch.Tensor
 ) -> torch.Tensor:
-    """``BCE(s(x,u), 1) + BCE(s(x,u*), 0)`` -- eq. (9)."""
+    """``BCE(s(x,u), 1) + BCE(s(x,u*), 0)``, each a mean over its rows."""
     return F.binary_cross_entropy_with_logits(
         real_logits, torch.ones_like(real_logits)
     ) + F.binary_cross_entropy_with_logits(

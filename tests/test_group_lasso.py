@@ -61,14 +61,14 @@ def test_gradients_reach_B():
 
 
 def test_batches_hold_whole_groups():
-    pair = np.tile(np.repeat(np.arange(10), 7), 2)       # 10 pairs, measured + synthetic rows
-    keys = group_keys(pair % 5, pair // 5, np.r_[np.ones(70, bool), np.zeros(70, bool)])
+    pair = np.repeat(np.arange(20), 7)                   # 20 pairs, 7 rows each
+    keys = group_keys(pair % 5, pair // 5)
     for rng in (None, np.random.default_rng(0)):
         batches = group_batches(keys, 16, rng)
         assert sorted(np.concatenate(batches)) == list(range(len(keys)))
         seen = [set(keys[b]) for b in batches]
         assert all(not (a & b) for i, a in enumerate(seen) for b in seen[i + 1:])
-    # measured and synthetic rows of a pair are separate groups
+    # one group per pair
     assert len(np.unique(keys)) == 20
 
 

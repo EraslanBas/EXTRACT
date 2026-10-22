@@ -7,7 +7,9 @@ truth. What you can test is **reproducibility**: identified axes should recur
 across seeds, arbitrary ones should not.
 
 Factors are recovered only up to permutation and sign, so any comparison must
-match them first (Hungarian assignment on |correlation|) before scoring.
+match them first (Hungarian assignment on |cos|) before scoring. Loadings are
+compared as they are: no centring across genes, since zero is "no response"
+for log-fold changes.
 """
 
 from __future__ import annotations
@@ -22,17 +24,18 @@ from scipy.optimize import linear_sum_assignment
 class FactorMatch:
     permutation: np.ndarray  # column j of B2 matched to factor j of B1
     signs: np.ndarray
-    correlations: np.ndarray  # matched |correlation| per factor
-    mcc: float  # mean |correlation| = MCC
+    correlations: np.ndarray  # matched |cos| per factor (|correlation| with centre=True)
+    mcc: float  # mean of the matched values
 
 
-def match_factors(A: np.ndarray, B: np.ndarray) -> FactorMatch:
-    """Match rows of ``B`` to rows of ``A`` by |correlation|.
+def match_factors(A: np.ndarray, B: np.ndarray, centre: bool = False) -> FactorMatch:
+    """Match rows of ``B`` to rows of ``A`` by |cos| (Hungarian assignment).
 
-    Both are [n_factors, n_features] -- loading matrices, or factor activations
-    transposed. Returns the permutation, the recovered signs, and the mean
-    absolute correlation (MCC), the standard permutation-invariant score used
-    in the nonlinear ICA literature.
+    Both are [n_factors, n_features]. For loading matrices use the default,
+    the cosine of the raw vectors: no centring across genes. ``centre=True``
+    centres each row first (|Pearson correlation|, the MCC of the nonlinear ICA
+    literature), for factor activations transposed. Returns the permutation,
+    the recovered signs, the matched values and their mean.
     """
     A = np.asarray(A, dtype=np.float64)
     B = np.asarray(B, dtype=np.float64)
@@ -40,7 +43,7 @@ def match_factors(A: np.ndarray, B: np.ndarray) -> FactorMatch:
         raise ValueError(
             f"feature dimension differs: {A.shape[1]} vs {B.shape[1]}"
         )
-    corr = _cross_correlation(A, B)
+    corr = _cosine(A, B, centre)
     rows, cols = linear_sum_assignment(-np.abs(corr))
     matched = corr[rows, cols]
     return FactorMatch(
@@ -51,12 +54,13 @@ def match_factors(A: np.ndarray, B: np.ndarray) -> FactorMatch:
     )
 
 
-def _cross_correlation(A: np.ndarray, B: np.ndarray) -> np.ndarray:
-    Ac = A - A.mean(axis=1, keepdims=True)
-    Bc = B - B.mean(axis=1, keepdims=True)
-    Ac /= np.linalg.norm(Ac, axis=1, keepdims=True) + 1e-12
-    Bc /= np.linalg.norm(Bc, axis=1, keepdims=True) + 1e-12
-    return Ac @ Bc.T
+def _cosine(A: np.ndarray, B: np.ndarray, centre: bool = False) -> np.ndarray:
+    if centre:
+        A = A - A.mean(axis=1, keepdims=True)
+        B = B - B.mean(axis=1, keepdims=True)
+    A = A / (np.linalg.norm(A, axis=1, keepdims=True) + 1e-12)
+    B = B / (np.linalg.norm(B, axis=1, keepdims=True) + 1e-12)
+    return A @ B.T
 
 
 def stability_across_seeds(
@@ -64,7 +68,7 @@ def stability_across_seeds(
 ) -> dict[str, np.ndarray | float]:
     """Match every run to one reference run and summarise per-factor recurrence.
 
-    Returns ``per_factor`` (mean matched |corr| for each reference factor across
+    Returns ``per_factor`` (mean matched |cos| for each reference factor across
     the other runs) and ``mcc`` (the overall mean). Report only factors whose
     ``per_factor`` score is high; the rest are run-specific artefacts.
     """

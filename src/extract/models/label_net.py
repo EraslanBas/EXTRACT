@@ -1,8 +1,8 @@
-"""(perturbation, context) -> per-component coefficients lambda.
+"""(perturbation, context) -> per-component coefficients theta (and c_k).
 
 Deliberately expressive. The identifiability constraint in
-``models.heads.PerComponentHead`` restricts only *how* lambda meets the
-features -- never how lambda itself is computed. All of the perturbation x
+``models.heads.PerComponentHead`` restricts only *how* theta meets the
+features -- never how theta itself is computed. All of the perturbation x
 context interaction lives here and is unconstrained.
 
 Factorised rather than one free embedding row per observed ``(p, c)`` tuple.
@@ -21,7 +21,8 @@ from torch import nn
 
 
 class FactorizedLabelNet(nn.Module):
-    """Map ``(perturbation_idx, context_idx)`` to ``lambda`` [d, n_basis].
+    """Map ``(perturbation_idx, context_idx)`` to the head's coefficients
+    [d, n_basis] (``n_basis`` = the head's outputs per factor: theta and c_k).
 
     Parameters
     ----------

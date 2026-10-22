@@ -1,8 +1,9 @@
-"""The one factor->gene map, and the projection derived from it.
+"""The one factor->gene map, the projection derived from it, and the gene-side prior.
 
-    B      [d, G]   the only interpretable output, the only learned map
+    B      [d, G]   the only interpretable output, the only learned map (B = A V)
     B^+    [G, d]   B^T (B B^T)^{-1}  -- computed, never fitted
-    z      [d]      argmin_z ||m * (x - z B)||^2
+    z_ls   [d]      argmin_z ||m * (x - z B)||^2, the start of the group lasso
+                    and the projection behind the span residual
 
 There is deliberately no encoder. With a separate ``W`` there are two maps
 between factors and genes, they are free to disagree about what factor ``k``
@@ -11,11 +12,9 @@ not *patterns*, and a filter can place large weight on a gene precisely to
 cancel it as a nuisance (Haufe et al. 2014). Tying removes the question --
 ``B`` is a pattern by construction.
 
-``x`` is therefore never on a generative path. It is projected so the
-discriminator can judge it, and it is the regression target.
-
-See the method paper sections 3.1-3.2 for the derivation; the
-equation numbers in the comments below refer to it.
+``x`` is therefore never on a generative path. Its activities are fitted
+through ``B`` (``models.group_lasso``) so the discriminator can judge it, and
+it is the regression target.
 """
 
 from __future__ import annotations
@@ -73,9 +72,9 @@ class GlobalLoadings(nn.Module):
     ) -> torch.Tensor:
         """Masked least-squares coordinates of ``x`` in ``B``'s row space.
 
-        Unmasked this is eq. (2), ``z = x B^+``. With one masked entry per row
-        it is eq. (4), a rank-one downdate of the shared Gram matrix, applied
-        via Sherman-Morrison (eq. 5) so that one ``d x d`` inverse serves every
+        Unmasked this is ``z = x B^+``. With one masked entry per row it is a
+        rank-one downdate of the shared Gram matrix, applied via
+        Sherman-Morrison so that one ``d x d`` inverse serves every
         row and each row costs ``O(d^2)`` however many distinct genes the batch
         masks.
 
@@ -95,7 +94,7 @@ class GlobalLoadings(nn.Module):
         """
         Ginv = self.gram_inverse()                      # [d, d], symmetric
         if target_col is None:
-            return (x @ self.B.T) @ Ginv                # eq. (2)
+            return (x @ self.B.T) @ Ginv                # z = x B^+
 
         masked = target_col != NO_MASK
         x_tilde = x
@@ -121,7 +120,7 @@ class GlobalLoadings(nn.Module):
             correction[stable] = (
                 Ginv_b[stable] * (num[stable] / denom[stable]).unsqueeze(-1)
             )
-        z = z + correction                              # eq. (4) via eq. (5)
+        z = z + correction                              # Sherman-Morrison
 
         # Explicit solve for the few rows where the identity is ill-conditioned.
         unstable = masked & ~stable
@@ -182,7 +181,7 @@ class GlobalLoadings(nn.Module):
     def span_residual(
         self, x: torch.Tensor, target_col: torch.Tensor | None = None
     ) -> torch.Tensor:
-        """``||m * (x - x B^+ B)|| / ||m * x||`` per row -- eq. (14).
+        """``||m * (x - x B^+ B)|| / ||m * x||`` per row (the span residual).
 
         The one measurement that can invalidate the architecture rather than
         call for a tuning pass: a held-out drug whose rows carry a large

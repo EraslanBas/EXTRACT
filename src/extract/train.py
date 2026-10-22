@@ -137,7 +137,8 @@ class Extract(nn.Module):
     """One global loading matrix, a per-component head, and a label network.
 
     There is no encoder and no label prior. ``B`` is the only factor->gene map;
-    ``z`` is the masked least-squares projection of ``x`` onto its row space.
+    ``z`` is fitted to ``x`` through ``B`` by the per-pair group lasso
+    (``coding="group_lasso"``; masked least squares with ``coding="ls"``).
     """
 
     def __init__(
@@ -192,7 +193,7 @@ class Extract(nn.Module):
         self, x: torch.Tensor, target_col: torch.Tensor | None = None,
         groups: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        """``z`` -- eq. (2)/(4). Masked when ``target_col`` is given. With
+        """The activities ``z``. Masked when ``target_col`` is given. With
         ``coding="group_lasso"`` the group-lasso activities (``groups`` [n]:
         one id per (perturbation, context) pair), used both by the
         discriminator and in the reconstruction objective; they and the
@@ -214,7 +215,7 @@ class Extract(nn.Module):
         perturbation_idx: torch.Tensor,
         context_idx: torch.Tensor,
     ) -> torch.Tensor:
-        """``s(x, u) = sum_k psi_k(z_k, u) + b`` -- eq. (7)."""
+        """``s(x, u) = b + sum_k psi_k(z_k, u)``, the true-label logit."""
         return self.head(z, self.label_net(perturbation_idx, context_idx))
 
     def component_evidence(
@@ -223,9 +224,8 @@ class Extract(nn.Module):
         perturbation_idx: torch.Tensor,
         context_idx: torch.Tensor,
     ) -> torch.Tensor:
-        """``psi_k`` per factor -- [batch, n_factors]. The per-factor evidence
-        of table 2, not a per-factor decision: these are summed before any
-        decision is taken."""
+        """``psi_k`` per factor -- [batch, n_factors]. Per-factor evidence, not
+        a per-factor decision: these are summed before any decision is taken."""
         return self.head.evidence(z, self.label_net(perturbation_idx, context_idx))
 
     @property
@@ -940,7 +940,7 @@ def reconstruct(
     model: Extract, X: np.ndarray, target_col: np.ndarray | None = None,
     groups: np.ndarray | None = None,
 ) -> np.ndarray:
-    """``X_hat = z B`` with ``z`` the masked projection of ``X``."""
+    """``X_hat = z B`` with ``z`` the activities of ``X`` (as :func:`encode`)."""
     model.eval()
     device = next(model.parameters()).device
     x = torch.from_numpy(np.asarray(X, dtype=np.float32)).to(device)

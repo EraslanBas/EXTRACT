@@ -1,4 +1,4 @@
-# Current EXTRACT configuration (defaults on `main`, 2026-10-20)
+# Current EXTRACT configuration (defaults on `main`, updated 2026-10-22)
 
 Chosen from the 90-model comparison on the no-MT data (`sweep_jdstats_d20_noMT/`). Running
 `scripts/sweep_grid.py` with no model flags reproduces it exactly.
@@ -14,7 +14,7 @@ Chosen from the 90-model comparison on the no-MT data (`sweep_jdstats_d20_noMT/`
 | Discriminator | binary; false examples = label swaps only, one per row | (the only negatives) |
 | Label network | MLP on [perturbation 64, context 8] embeddings, dropout 0.2, weight decay 0.01 | `--label-dropout 0.2 --label-weight-decay 0.01` |
 | Embedding starts | perturbations: target-gene responses in the training pairs; contexts: PCA of control-cell means | `--pert-embedding-init response --context-embedding-init control-means` |
-| Gene axis | L1/L2 sparseness of each program's loadings (gamma = 0.05) + hinge forbidding \|cos\| > 0.5 between programs (at least 60 degrees apart; mu = 100) | `--gene-prior l1 --gene-sparsity 0.05 --distinct-tau 0.5 --distinct-weight 100` |
+| Gene axis | L1/L2 sparseness of each program's loadings (gamma = 0.05) + hinge forbidding \|cos\| > 0.5 between programs (at least 60 degrees apart; mu = 100) | `--gene-sparsity 0.05 --distinct-tau 0.5 --distinct-weight 100` |
 | Loss | L_disc + alpha * L_lasso + gamma * L_genes + mu * L_distinct, alpha = 700 | `--alpha 700` |
 | Training | 1000 epochs, batch 1,024, evaluated every 3 epochs, no early stopping, best epoch by validation ROC AUC; 3 seeds | `--epochs 1000` |
 | Saved per model | best and final weights, config, label levels, history (every loss term), validation logits | |
@@ -24,4 +24,4 @@ signal-to-noise subspaces, free B, the perturbation halves. Removed from the cod
 history): the distance head, the plain statistics head, product/AMMI label models, shuffled-data
 negatives, precision weights, the total-correlation term, early stopping, the top-k gene prior. See `group_lasso/group_lasso.pdf` for the group lasso.
 
-Open next: reproducibility across halves of the perturbations (`--perturbation-half`, `--shared-subspace`), a hyperparameter sweep on it, then random starts per seed.
+Done 2026-10-22: reproducibility across halves of the perturbations (`--perturbation-half`, `--shared-subspace`), {own, shared} V x {gene prior, none}, in `sweep_halvesGS_d20_noMT/`. Open next: a hyperparameter sweep on cross-half agreement, then random starts per seed.

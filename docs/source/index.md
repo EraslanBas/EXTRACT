@@ -197,9 +197,15 @@ The pair means are **not centred**: for log-fold changes, zero already means "no
 response", and centring would shift every gene by its average response. Working
 on pair means rather than individual rows makes the components follow
 differences *between* perturbations, which is what the programs describe; the
-within-pair scatter is measurement noise. PCA of the pair means is also very
-stable: computed on two disjoint halves of the pairs, the two subspaces agree
-closely.
+within-pair scatter is measurement noise.
+
+$\mathbf V$ depends on which perturbations the screen contains. Computed
+separately on two disjoint halves of the perturbations, the two subspaces
+overlap only partly, and programs found on different data can agree only as
+far as their subspaces do. Comparing models trained on different perturbations
+therefore separates two questions: how stable the subspace is, and how stably
+the axes are chosen inside a given subspace (both halves using one
+$\mathbf V$).
 
 `fit()` computes $\mathbf V$ automatically (`extract.data.noise.pca_subspace`); a
 precomputed basis can also be passed in.
@@ -228,7 +234,8 @@ profiles differ (second-order blind source separation).
 1. Write the training pair means in an orthonormal basis $\mathbf Q$ of
    $\mathbf V$'s span.
 2. For every context, compute the covariance $\boldsymbol\Sigma_c$ of the pair
-   means over its pairs (centred within the context).
+   means over its pairs (centred within the context). Contexts with no more
+   pairs than $d$ are left out, since their covariance is not of full rank.
 3. Whiten by their average, $\mathbf W = \big(\tfrac1C\sum_c\boldsymbol\Sigma_c\big)^{-1/2}$,
    and find the orthogonal $\mathbf U$ that makes every
    $\mathbf W\boldsymbol\Sigma_c\mathbf W$ as diagonal as possible (Jacobi
@@ -295,7 +302,7 @@ label network, and a per-component head (`extract.train.Extract`).
 
 ```{raw} html
 <div class="ex-figure">
-<svg viewBox="0 0 780 330" width="780" height="330" role="img" aria-label="Forward pass: x is masked; its activities z are found by a group lasso shared by the rows of its (perturbation, context) pair; four statistics of z are weighted by label coefficients lambda, a label-only normaliser is subtracted, and the sum is the logit; z times B reconstructs x.">
+<svg viewBox="0 0 780 330" width="780" height="330" role="img" aria-label="Forward pass: x is masked; its activities z are found by a group lasso shared by the rows of its (perturbation, context) pair; four statistics of z are weighted by label coefficients theta, a label-only normaliser is subtracted, and the sum is the logit; z times B reconstructs x.">
   <defs>
     <marker id="a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="ah"/></marker>
     <marker id="aB" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="ahB"/></marker>
@@ -342,17 +349,17 @@ label network, and a per-component head (`extract.train.Extract`).
   <text x="380" y="297" text-anchor="middle" class="sub">own or permuted</text>
   <rect class="box" x="480" y="256" width="140" height="52" rx="4"/>
   <text x="550" y="279" text-anchor="middle" font-size="13.5">[e_p ; e_c] → MLP</text>
-  <text x="550" y="297" text-anchor="middle" class="sub">λ(u) · d×4</text>
+  <text x="550" y="297" text-anchor="middle" class="sub">θ(u) · d×4, c(u) · d</text>
   <path class="ln" d="M450 282 H478" marker-end="url(#a)"/>
   <path class="ln" d="M620 282 H668 V84" marker-end="url(#a)"/>
-  <text x="660" y="230" text-anchor="end" class="sub">λ ⊙ q(z)</text>
+  <text x="660" y="230" text-anchor="end" class="sub">θ ⊙ q(z)</text>
   <rect class="loss" x="706" y="150" width="62" height="52" rx="4"/>
   <text x="737" y="173" text-anchor="middle" font-size="13.5">L_disc</text>
   <text x="737" y="191" text-anchor="middle" class="sub">BCE</text>
   <path class="ln" d="M737 88 V148" marker-end="url(#a)"/>
 </svg>
 </div>
-<p class="ex-caption">One forward pass. Blue marks B and the two maps derived from it; red marks the loss terms. The label u reaches the score only through λ, which multiplies per-factor statistics before the sum.</p>
+<p class="ex-caption">One forward pass. Blue marks B and the two maps derived from it; red marks the loss terms. The label u reaches the score only through θ, which multiplies per-factor statistics before the sum, and the label-only term c.</p>
 ```
 
 #### Loadings: one map, no encoder
@@ -421,17 +428,17 @@ perturbation and context were both seen but never together, be scored at all.
 For a row with activities $\mathbf z$ and a candidate label $u = (p, c)$,
 
 $$
-s(\mathbf x, u) \;=\; b \;+\; \sum_{k=1}^{d}\Big[\sum_{j=1}^{4} \lambda_{kj}(u)\, q_j(z_k) \;-\; c_k(u)\Big],
+s(\mathbf x, u) \;=\; b \;+\; \sum_{k=1}^{d}\Big[\sum_{j=1}^{4} \theta_{kj}(u)\, q_j(z_k) \;-\; c_k(u)\Big],
 \qquad
 \Pr(\text{true label} \mid \mathbf x, u) = \sigma\big(s(\mathbf x, u)\big),
 $$
 
 with the statistics $q = (z,\ z^2,\ |z|,\ \tanh z)$ applied coordinate-wise.
-The label network gives, per program, the four weights $\lambda_{k\cdot}(u)$ and
+The label network gives, per program, the four weights $\theta_{k\cdot}(u)$ and
 the term $c_k(u)$. No term ever multiplies $z_k$ by $z_{k'}$; the head's own
 parameter is the bias $b$.
 
-**What the head models.** For each program, $\exp\big(\sum_j \lambda_{kj}(u)\,q_j(z_k) - c_k(u)\big)$
+**What the head models.** For each program, $\exp\big(\sum_j \theta_{kj}(u)\,q_j(z_k) - c_k(u)\big)$
 is a distribution of that program's activity under the label: $z$ and $z^2$ set
 its centre and width, $|z|$ lets it be sparse (mostly zero, sometimes large),
 $\tanh z$ lets it be one-sided. A row scores high when each of its activities
@@ -466,7 +473,7 @@ $\sum_k c_k(u)$ enters the score.
 classifier has the logit $\log p(\mathbf x, u) / \big(p(\mathbf x)\,p(u)\big)$.
 If the programs are independent given the label and each has an
 exponential-family distribution in these statistics, that logit is exactly
-$\sum_k \big[\boldsymbol\lambda_k(u)\cdot\mathbf q(z_k) - \log Z_k(u)\big]$ plus
+$\sum_k \big[\boldsymbol\theta_k(u)\cdot\mathbf q(z_k) - \log Z_k(u)\big]$ plus
 terms that do not depend on the label: the head's form, with $c_k = \log Z_k$.
 This is generalised contrastive learning (Hyvärinen, Sasaki & Turner 2019; the
 same assumption as time-contrastive learning and iVAE). Separability in the
@@ -492,7 +499,7 @@ rotation only weakly; the starting axes and the group lasso supply the rest.
 | `q(z)` | [batch, d, 4] | head | four statistics |
 | `e_p` | [batch, $d_p$] | label network | shared perturbation embedding |
 | `e_c` | [batch, $d_c$] | label network | shared context embedding |
-| `λ`, `c` | [batch, d, 4], [batch, d] | label network | label-dependent weights and normaliser |
+| `θ`, `c` | [batch, d, 4], [batch, d] | label network | label-dependent weights and normaliser |
 | `s` | [batch] | head | true/false logit |
 
 ### Objective
@@ -512,13 +519,15 @@ to model how $\mathbf x$ depends on $u$.
 **The group-lasso objective.**
 
 $$
-\mathcal L_{\text{lasso}} = \frac1n\sum_{\text{rows } r}\frac{\|\mathbf m_r\odot(\mathbf x_r - \mathbf z_r\mathbf B)\|^2}{G}
+\mathcal L_{\text{lasso}} = \frac1n\sum_{\text{rows } r}\frac{\|\mathbf m_r\odot(\mathbf x_r - \mathbf z_r\mathbf B)\|^2}{G_r}
 \;+\; \frac{2\lambda}{nG}\sum_{\text{pairs } g}\sqrt{n_g}\sum_k\|\mathbf Z_g[:,k]\|_2 ,
 $$
 
-over the batch's $n$ measured rows, with the raw lasso activities. It is the
-per-pair objective above, summed over the batch's pairs and divided by $nG/2$,
-so it is on a per-row, per-gene scale. $\lambda$ appears twice: in the solve
+over the batch's $n$ measured rows, with the group-lasso activities; $G_r$ is
+the number of genes row $r$ keeps ($G$, or $G-1$ when its target gene is
+masked). It is the per-pair objective above, summed over the batch's pairs and
+divided by $nG/2$ (up to that one masked gene), so it is on a per-row, per-gene
+scale. $\lambda$ appears twice: in the solve
 (which programs a pair selects) and here (so the gradient on $\mathbf A$ makes
 axes on which pairs need fewer programs cheaper). Every row weighs the same.
 
@@ -591,13 +600,14 @@ With one context only the first strategy exists, and it suffices.
 ### Training loop
 
 `fit()` takes the rows, their integer-encoded perturbation and context, the
-on-target column, an `is_real` flag and train/validation masks. First it
+on-target column and train/validation masks. First it
 computes $\mathbf V$ from the measured training rows, the starting axes
 $\mathbf A_0$ by joint diagonalisation, and the starting embeddings. Then, per
 step:
 
-1. Draw a batch of **whole pairs** (up to a target number of rows), so each pair's rows are
-   solved together; the sampler returns a wrong label for each measured row.
+1. Draw a batch of **whole pairs**: pairs in random order are added until the
+   batch reaches the target number of rows, so each pair's rows are solved
+   together; the sampler returns a wrong label for each measured row.
 2. Solve the group lasso for every pair of the batch with the current
    $\mathbf B$, with the on-target mask.
 3. Score true labels $s(\mathbf z, p, c)$ and false labels
@@ -628,6 +638,8 @@ context: the model has to supply the interaction.
 number of epochs, and the kept state
 is the epoch with the highest **validation ROC AUC**: how well the scores rank
 validation rows under their own label above the same rows under a wrong label.
+The wrong labels of validation rows are drawn the same way as in training, but
+from the validation pairs, so validation never names a training pair either.
 AUC depends only on the ranking, so it compares models whose scores are on
 different scales.
 
@@ -650,9 +662,9 @@ the read is logged.
 |---|---|
 | held-out AUC | Can the model tell an unseen $(p, c)$ from a wrong label? A lookup table scores 0.5. |
 | programs per pair | How many programs the group lasso selects for a held-out pair. |
-| reconstruction | Fraction of held-out signal $\mathbf z\mathbf B$ recovers. |
+| reconstruction | Masked squared error per gene of $\mathbf z\mathbf B$, with the group-lasso activities; `extract.evaluation.reconstruction` also gives the fraction of squared norm recovered by $\operatorname{span}(\mathbf B)$ (least-squares activities). |
 | span residual $r$ | $\|\mathbf m \odot (\mathbf x - \mathbf x\mathbf B^{+}\mathbf B)\| / \|\mathbf m \odot \mathbf x\|$: do held-out rows need programs outside $\operatorname{span}(\mathbf B)$? |
-| seed agreement | Matched $|\cos|$ between the programs of models trained with different seeds (Hungarian matching), against the agreement of two random sets of axes in $\mathbf V$. |
+| seed agreement | Matched $|\cos|$ between the programs of models trained with different seeds or on different data (Hungarian matching, no centring; `extract.evaluation.stability`), against the agreement of two random sets of axes in $\mathbf V$. |
 
 ### Reading the factors
 
@@ -691,7 +703,7 @@ validation.
 | `subspace` / `subspace_method` | `fixed` / `pca`: $\mathbf B = \mathbf A\mathbf V$ with $\mathbf V$ the PCA of the pair means; `free` learns $\mathbf B$ directly |
 | `axes_init` | `jd`: start $\mathbf A$ at the joint-diagonalisation axes; `random`: a random rotation per seed |
 | `coding` | `group_lasso`: activities by the per-pair group lasso; `ls` for plain least squares |
-| `basis` | the head's statistics (lin, sq, abs, tanh); must keep a non-quadratic one |
+| `basis` | the head's statistics (`linear`, `square`, `abs`, `tanh`); must keep a non-quadratic one |
 | `pert_embedding_init` | `response`: start from the target gene's responses; contexts from the control means (`--context-embedding-init control-means`) |
 | `no_mask` | ablation: no on-target mask |
 

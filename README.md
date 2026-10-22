@@ -63,42 +63,44 @@ them, does not.
 
 ## How it works
 
-EXTRACT finds the programs in two stages, the structure of ICA with both
-criteria replaced:
+The programs are `B = A V` (programs × genes). EXTRACT separates *which
+subspace* they span from *which axes* inside it are the programs:
 
-1. **The subspace, from signal relative to noise.** Each perturbation is
-   measured on its full set of cells and on random subsets of them; the
-   difference between a subsample and its full-data row is pure measurement
-   noise. From these differences EXTRACT estimates the noise and keeps the `d`
-   directions with the most perturbation-driven variation per unit of noise:
-   the label-driven subspace `V` (`d` × genes), computed once from the training
-   rows.
-2. **The axes, from the labels.** The programs are `B = A V`; only the `d` × `d`
-   matrix `A` is learned, by a contrastive head that must tell whether a
-   response belongs to its (perturbation, context) label and may score each
-   program only separately. That restriction is what makes the axes
-   identifiable.
+1. **The subspace.** `V` (`d` × genes) is the PCA of the training pairs' mean
+   responses (each pair's full-data row and disjoint pseudobulks averaged;
+   uncentred, since zero means "no response"). It is computed once and fixed;
+   only the `d` × `d` matrix `A` is learned.
+2. **The starting axes.** `A` starts at the joint diagonalisation of the
+   per-context covariances of the pair means inside `V`: the axes along which
+   the contexts' differences are cleanest.
+3. **The axes, refined.** For every (perturbation, context) pair, a group lasso
+   fits the pair's rows through `B` with as few programs as it can, so axes on
+   which perturbations act sparsely are cheaper. A discriminator must tell
+   whether a response belongs to its (perturbation, context) label and may score
+   each program only separately, which is what makes the axes identifiable. A
+   prior on the programs rewards few genes per program and forbids two programs
+   from pointing in nearly the same direction.
 
-Factor activations are the masked least-squares projection of each response
-onto `B`, so there is one map between programs and genes. The one-stage model,
-which learns `B` directly with `L = L_disc + alpha * L_recon`, remains available
-as `subspace="free"`.
+The activities are the group-lasso fit, so there is one map between programs
+and genes. The loss is
 
-## Choosing the mode
-
-The two-step model is the default. The one-step model, which learns `B`
-directly, is available as an option:
+    L = L_disc + alpha * L_lasso + gamma * L_genes + mu * L_distinct
 
 ```python
 from extract.train import TrainConfig, fit
-config = TrainConfig(subspace="fixed")   # default: V from the data, then B = A V
-config = TrainConfig(subspace="free")    # one step: B learned directly
+model, history = fit(X, perturbation_idx, context_idx, target_col,
+                     config=TrainConfig(), train_rows=train, val_rows=val)
 ```
 
 ```bash
-python scripts/fit_model.py --subspace fixed     # or: --subspace free
-python scripts/sweep_grid.py --subspace fixed free ...   # both, as a grid dimension
+python scripts/fit_model.py ...        # one model
+python scripts/sweep_grid.py ...       # a grid of models, several seeds
+python scripts/read_test.py ...        # the single test read
 ```
+
+The defaults are the model's structure; `d`, `lambda`, `alpha`, `gamma` and the
+label-network sizes are dataset-specific and tuned on validation. See the
+documentation for every choice and the reasoning behind it.
 
 ## Layout
 
@@ -106,8 +108,8 @@ python scripts/sweep_grid.py --subspace fixed free ...   # both, as a grid dimen
 src/extract/      the method
     de/                 shrunken-logFC pipeline (Welch + ashr), per context
     data/               gene filter, on-target mask, leak-free splits, the subspace V
-    models/             global loadings B, per-component head, label network
-    objectives/         label-swap discrimination, masked reconstruction
+    models/             loadings B = A V, group lasso, per-component head, label network
+    objectives/         label-swap discrimination, masked reconstruction error
     interpret/          loadings, sign anchoring, effect decomposition, enrichment export
     evaluation/         span test, cross-seed stability, held-out evaluation
     train.py            training loop and evaluation
