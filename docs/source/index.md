@@ -278,9 +278,8 @@ on the reconstruction error with step $1/L$ ($L$ the largest eigenvalue of
 $\mathbf B\mathbf B^\top$), shrink each column by block soft-thresholding,
 $\mathbf Z_g[:,k] \leftarrow \mathbf Z_g[:,k]\max\!\big(0,\,1-\eta\lambda\sqrt{n_g}/\|\mathbf Z_g[:,k]\|_2\big)$,
 and repeat for a fixed number of steps (`lasso_steps`). The steps are differentiable, so gradients reach
-$\mathbf B$. The lasso shrinks the activities it keeps, so for the discriminator
-the selected programs of each row are refitted by masked least squares; the
-reconstruction term uses the raw lasso activities.
+$\mathbf B$. The same activities are used everywhere: in the reconstruction
+objective and by the discriminator, so the whole model rests on one fit.
 
 **Why it helps fix the axes.** If the programs are the axes, a pair's response
 lies on a few of them and needs few non-zero columns. Rotate the axes and the
@@ -505,7 +504,7 @@ $$
 
 **Discrimination.**
 $\mathcal L_{\text{disc}} = \mathrm{BCE}\big(s(\mathbf x, u), 1\big) + \mathrm{BCE}\big(s(\mathbf x, u^{-}), 0\big)$,
-each term averaged over its own rows, on the refitted activities. A false
+each term averaged over its own rows, on the group-lasso activities. A false
 example keeps the observed vector and swaps the label, so the distribution of
 $\mathbf x$ is the same for true and false examples and the only way to win is
 to model how $\mathbf x$ depends on $u$.
@@ -600,7 +599,7 @@ step:
 1. Draw a batch of **whole pairs** (up to a target number of rows), so each pair's rows are
    solved together; the sampler returns a wrong label for each measured row.
 2. Solve the group lasso for every pair of the batch with the current
-   $\mathbf B$, with the on-target mask, and refit the selected programs.
+   $\mathbf B$, with the on-target mask.
 3. Score true labels $s(\mathbf z, p, c)$ and false labels
    $s(\mathbf z, p^*, c^*)$; the same $\mathbf z$ serves both.
 4. Compute $\mathcal L_{\text{disc}}$, $\mathcal L_{\text{lasso}}$ and the two gene-axis
@@ -692,7 +691,6 @@ validation.
 | `subspace` / `subspace_method` | `fixed` / `pca`: $\mathbf B = \mathbf A\mathbf V$ with $\mathbf V$ the PCA of the pair means; `free` learns $\mathbf B$ directly |
 | `axes_init` | `jd`: start $\mathbf A$ at the joint-diagonalisation axes; `random`: a random rotation per seed |
 | `coding` | `group_lasso`: activities by the per-pair group lasso; `ls` for plain least squares |
-| `lasso_refit` | the discriminator sees least-squares activities on the selected programs |
 | `basis` | the head's statistics (lin, sq, abs, tanh); must keep a non-quadratic one |
 | `pert_embedding_init` | `response`: start from the target gene's responses; contexts from the control means (`--context-embedding-init control-means`) |
 | `no_mask` | ablation: no on-target mask |
@@ -707,7 +705,7 @@ validation.
 | `embedding_dim` / `context_embedding_dim` / `label_hidden` | label-network sizes |
 | `label_dropout` / `label_weight_decay` | label-network regularisation |
 | `epochs` / `batch_size` / `lr` / `eval_every` | training length, batch size, learning rate, validation interval |
-| `lasso_steps` / `ridge` | group-lasso iterations; conditioning of the refit |
+| `lasso_steps` / `ridge` | group-lasso iterations; conditioning of the least-squares starting point |
 | `gene_sparsity` | $\gamma$, how concentrated the programs' loadings become |
 | `distinct_tau` / `distinct_weight` | $\tau$, the largest allowed $|\cos|$ between two programs (minimum angle $\arccos\tau$); $\mu$, how strictly it is enforced |
 
@@ -717,7 +715,7 @@ validation.
 |---|---|
 | `extract/de/` | Welch statistics → `ashr` → merge → pivot; full-data and disjoint pseudobulk rows; matrix assembly |
 | `extract/data/` | `noise.py` the subspace $\mathbf V$ (PCA of pair means; signal-to-noise variants); `splits.py` test pairs, validation, the low-cell filter, gene lists |
-| `extract/models/` | `loadings.py` $\mathbf B = \mathbf A\mathbf V$ and projections; `group_lasso.py` the per-pair group lasso and refit; `heads.py` the per-component head; `label_net.py` |
+| `extract/models/` | `loadings.py` $\mathbf B = \mathbf A\mathbf V$ and projections; `group_lasso.py` the per-pair group lasso; `heads.py` the per-component head; `label_net.py` |
 | `extract/objectives/` | `contrastive.py` label-swap sampler and BCE; `reconstruction.py` the masked squared error |
 | `extract/train.py` | `TrainConfig`, `Extract`, `fit`, `evaluate`, `jd_axes`, embedding starts, `load_model` |
 | `extract/interpret/` | loadings, sign anchoring, effect decomposition, enrichment export |

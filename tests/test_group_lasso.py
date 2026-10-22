@@ -7,7 +7,7 @@ import pytest
 import torch
 
 from extract.models.group_lasso import (
-    group_batches, group_keys, group_lasso_codes, group_penalty, refit_codes)
+    group_batches, group_keys, group_lasso_codes, group_penalty)
 from extract.train import TrainConfig, evaluate, fit, encode
 
 
@@ -36,14 +36,6 @@ def test_selection_is_shared_within_a_group_and_recovers_the_support():
     assert (Z[~sel] == 0).all()
 
 
-def test_refit_is_least_squares_on_the_selected_programs():
-    X, B, groups, _ = _planted(n_pairs=3)
-    sel = torch.zeros(len(X), B.shape[0], dtype=torch.bool); sel[:, :3] = True
-    Z = refit_codes(X, B, sel, ridge=0.0)
-    expect = torch.linalg.lstsq(B[:3].T, X.T).solution.T
-    assert torch.allclose(Z[:, :3], expect, atol=1e-4) and (Z[:, 3:] == 0).all()
-
-
 def test_masked_gene_is_ignored_by_the_solver():
     X, B, groups, _ = _planted(n_pairs=2)
     cols = torch.full((len(X),), 5)
@@ -63,7 +55,7 @@ def test_penalty_is_sqrt_group_size_times_column_norms():
 def test_gradients_reach_B():
     X, B, groups, _ = _planted(n_pairs=4)
     B = B.clone().requires_grad_(True)
-    Z, _ = group_lasso_codes(X, B, groups, 0.3, steps=20, refit=False)
+    Z, _ = group_lasso_codes(X, B, groups, 0.3, steps=20)
     ((X - Z @ B) ** 2).sum().backward()
     assert B.grad is not None and float(B.grad.abs().sum()) > 0
 

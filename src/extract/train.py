@@ -46,7 +46,7 @@ class TrainConfig:
     embedding_dim: int = 64
     context_embedding_dim: int = 8
     label_hidden: int = 128
-    #: Conditioning of the least-squares projections and refit.
+    #: Conditioning of the least-squares projections.
     ridge: float = 1e-4
 
     #: Weight of the group-lasso objective (reconstruction error plus group
@@ -97,9 +97,6 @@ class TrainConfig:
     coding: str = "group_lasso"
     lasso_lambda: float = 0.0272
     lasso_steps: int = 30
-    #: z handed to the discriminator: refitted least squares on the selected
-    #: programs (True) or the shrunken lasso activities (False).
-    lasso_refit: bool = True
 
     #: Regularisation of the label network against memorising training pairs:
     #: decoupled (AdamW) weight decay on its parameters only, and dropout on
@@ -197,19 +194,19 @@ class Extract(nn.Module):
     ) -> torch.Tensor:
         """``z`` -- eq. (2)/(4). Masked when ``target_col`` is given. With
         ``coding="group_lasso"`` the group-lasso activities (``groups`` [n]:
-        one id per (perturbation, context) pair); the raw lasso
-        activities and the selection are kept in ``lasso_raw_`` / ``lasso_sel_``."""
+        one id per (perturbation, context) pair), used both by the
+        discriminator and in the reconstruction objective; they and the
+        selection are also kept in ``lasso_raw_`` / ``lasso_sel_``."""
         z = self.loadings.project(x, target_col)
         if self.config.coding == "ls":
             return z
         if groups is None:
             raise ValueError("coding='group_lasso' needs the row groups")
-        from .models.group_lasso import group_lasso_codes, refit_codes
-        B = self.loadings.B
-        Z, sel = group_lasso_codes(x, B, groups, self.config.lasso_lambda, target_col,
-                                   z0=z.detach(), steps=self.config.lasso_steps, refit=False)
+        from .models.group_lasso import group_lasso_codes
+        Z, sel = group_lasso_codes(x, self.loadings.B, groups, self.config.lasso_lambda, target_col,
+                                   z0=z.detach(), steps=self.config.lasso_steps)
         self.lasso_raw_, self.lasso_sel_ = Z, sel
-        return refit_codes(x, B, sel, target_col) if self.config.lasso_refit else Z
+        return Z
 
     def score(
         self,

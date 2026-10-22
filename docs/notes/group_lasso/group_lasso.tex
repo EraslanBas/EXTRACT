@@ -115,11 +115,8 @@ programs}. On the real data, 30 steps select the same programs as 150 steps in
 99.7--99.9\% of cases. The steps are ordinary differentiable operations, so
 gradients flow back to $B$ through them (the starting point is held fixed).
 
-\paragraph{Refit.} The lasso shrinks the activities it keeps. For the
-discriminator, the selected programs of each row are therefore refitted by
-masked least squares (unselected programs stay exactly 0), which removes the
-shrinkage. The discriminator sees these refitted activities; the
-reconstruction term below uses the raw lasso activities.
+\paragraph{One fit.} The same activities are used everywhere: in the
+reconstruction objective below and by the discriminator.
 
 \section{How it enters training}
 
@@ -131,11 +128,10 @@ reconstruction term below uses the raw lasso activities.
   L_\text{lasso} \;=\; \frac1{n}\sum_{\text{rows}} \frac{\|\m_r\odot(\x_r-\z_r B)\|^2}{G}
   \;+\; \frac{2\lambda}{nG}\sum_{\text{pairs } g}\sqrt{n_g}\sum_k\|Z_g[:,k]\|_2 ,
 \end{equation}
-with $n$ the number of measured rows in the batch and $Z$ the raw lasso
-activities. $L_\text{lasso}$ is exactly equation~\eqref{eq:gl}, summed over the
+with $n$ the number of rows in the batch and $Z$ the lasso activities. $L_\text{lasso}$ is exactly equation~\eqref{eq:gl}, summed over the
 batch's pairs and divided by $nG/2$, so it is on the same per-row, per-gene
-scale as before. $L_\text{disc}$ is the binary discriminator loss on the
-refitted activities ($\alpha=700$).
+scale as before. $L_\text{disc}$ is the binary discriminator loss on the same
+activities ($\alpha=700$).
 
 \paragraph{$\lambda$ appears twice.} In the solve (which programs each pair
 selects) and in the loss (so the gradient on $A$ feels the penalty: axes on which
@@ -146,9 +142,9 @@ pairs need fewer programs become cheaper).
   \item A batch is made of \emph{whole pairs} (all rows of a pair together),
   about 1{,}024 rows.
   \item Solve equation~\eqref{eq:gl} for every pair of the batch with the
-  current $B$; refit.
-  \item Compute $L_\text{disc}$ (refitted activities) and $L_\text{lasso}$ (raw
-  activities); backpropagate; one optimiser step on $A$ and the label network.
+  current $B$.
+  \item Compute $L_\text{disc}$ and $L_\text{lasso}$ on these activities;
+  backpropagate; one optimiser step on $A$ and the label network.
   \item Rescale the rows of $B=AV$ to unit length.
 \end{enumerate}
 Validation and inference also need whole pairs: each row must be solved

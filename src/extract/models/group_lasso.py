@@ -11,8 +11,8 @@ pair or by none; its activity can still differ between the pair's rows.
 ``sqrt(n_g)`` keeps the penalty comparable between pairs with few and many
 rows. Solved by FISTA (proximal gradient with momentum), unrolled for a fixed
 number of steps so gradients flow back to B; started at the least-squares
-activities. With ``refit`` the selected programs are refitted by masked least
-squares, which removes the lasso's shrinkage of the kept activities.
+activities. The same activities are used everywhere: in the reconstruction
+objective and by the discriminator.
 """
 
 from __future__ import annotations
@@ -47,8 +47,6 @@ def group_lasso_codes(
     target_col: torch.Tensor | None = None,
     z0: torch.Tensor | None = None,
     steps: int = 30,
-    refit: bool = True,
-    ridge: float = 1e-4,
 ):
     """``(Z [n, d], selected [n, d] bool)`` for rows ``x`` [n, G]; ``selected``
     is the same for all rows of a group.
@@ -75,9 +73,7 @@ def group_lasso_codes(
         Z, t = Zn, t_n
     _, selected = _group_prox(Z, g, n_groups, eta * thresh_base)
     sel_rows = selected[g]                                       # [n, d], same within a group
-    if not refit:
-        return Z, sel_rows
-    return refit_codes(x, B, sel_rows, target_col, ridge), sel_rows
+    return Z, sel_rows
 
 
 def group_keys(perturbation_idx, context_idx, is_real=None):
@@ -116,20 +112,3 @@ def group_penalty(Z: torch.Tensor, groups: torch.Tensor, lam: float) -> torch.Te
     sq = torch.zeros(n_groups, Z.shape[1], dtype=Z.dtype, device=Z.device).index_add(0, g, Z * Z)
     counts = torch.bincount(g, minlength=n_groups).to(Z.dtype)
     return lam * (counts.sqrt()[:, None] * sq.clamp_min(1e-20).sqrt()).sum()
-
-
-def refit_codes(x, B, sel_rows, target_col=None, ridge: float = 1e-4):
-    """Masked least squares on the selected programs of each row (``sel_rows``
-    [n, d] bool); unselected programs are zero. Removes the lasso's shrinkage."""
-    xm = x * _mask(x, target_col)
-    sel = sel_rows.to(x.dtype)
-    Gram = (B @ B.T).expand(x.shape[0], -1, -1).clone()
-    if target_col is not None:
-        r = torch.nonzero(target_col != NO_MASK, as_tuple=True)[0]
-        b = B[:, target_col[r]].T                               # [r, d]
-        Gram[r] = Gram[r] - b[:, :, None] * b[:, None, :]
-    rhs = xm @ B.T
-    eye = torch.eye(B.shape[0], dtype=x.dtype, device=x.device)
-    big = 1e6 * (1.0 - sel)                                     # pins unselected programs to 0
-    A = Gram * (sel[:, :, None] * sel[:, None, :]) + eye * (ridge + big)[:, :, None]
-    return torch.linalg.solve(A, (rhs * sel)[:, :, None]).squeeze(-1) * sel

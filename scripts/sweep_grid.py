@@ -228,9 +228,6 @@ def main() -> int:
                          "(perturbation, context) pair (adds _gl<lambda>), or plain least squares")
     ap.add_argument("--lasso-lambda", type=float, default=0.0272)
     ap.add_argument("--lasso-steps", type=int, default=30)
-    ap.add_argument("--no-lasso-refit", action="store_true",
-                    help="give the discriminator the raw lasso activities instead of the "
-                         "least-squares refit on the selected programs; adds _norefit")
     ap.add_argument("--gene-sparsity", type=float, default=0.05,
                     help="gamma, weight of the L1/L2 sparseness of each program's loadings; adds _gs<gamma>")
     ap.add_argument("--distinct-weight", type=float, default=100.0,
@@ -383,8 +380,7 @@ def main() -> int:
                + (f"_gs{args.gene_sparsity:g}" if args.gene_sparsity else "")
                + ((f"_dt{args.distinct_tau:g}" + (f"_dw{args.distinct_weight:g}" if args.distinct_weight != 100 else ""))
                   if args.distinct_weight else "")
-               + (f"_gl{args.lasso_lambda:g}" + ("_norefit" if args.no_lasso_refit else "")
-                  if args.coding == "group_lasso" else "_ls")
+               + (f"_gl{args.lasso_lambda:g}" if args.coding == "group_lasso" else "_ls")
                + (f"_half{args.perturbation_half}s{args.half_seed}"
                   + ("_sharedV" if args.shared_subspace else "")
                   if args.perturbation_half is not None else ""))
@@ -422,7 +418,7 @@ def main() -> int:
                           gene_sparsity=args.gene_sparsity, distinct_weight=args.distinct_weight,
                           distinct_tau=args.distinct_tau,
                           coding=args.coding, lasso_lambda=args.lasso_lambda,
-                          lasso_steps=args.lasso_steps, lasso_refit=not args.no_lasso_refit)
+                          lasso_steps=args.lasso_steps)
         snaps: dict[int, np.ndarray] = {}
         model, hist = fit(config=cfg, train_rows=~val, val_rows=val,
                           subspace_basis=(ext_bases[bname] if use_ext else bases.get(d)),
@@ -462,7 +458,7 @@ def main() -> int:
                "gene_sparsity": args.gene_sparsity, "distinct_weight": args.distinct_weight,
                "distinct_tau": args.distinct_tau,
                "coding": args.coding, "lasso_lambda": args.lasso_lambda,
-               "lasso_steps": args.lasso_steps, "lasso_refit": not args.no_lasso_refit,
+               "lasso_steps": args.lasso_steps,
                "perturbation_half": args.perturbation_half, "half_seed": args.half_seed,
                "shared_subspace": args.shared_subspace,
                "epochs_run": len(hist), "seconds": round(time.time()-t, 1)}

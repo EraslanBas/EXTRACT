@@ -9,7 +9,7 @@ Chosen from the 90-model comparison on the no-MT data (`sweep_jdstats_d20_noMT/`
 | Programs | d = 20 | `--d 20` / `n_factors` |
 | Subspace | fixed V = PCA of the training pair means; B = A V, A learned | `--subspace fixed --subspace-method pca` |
 | Starting axes | joint diagonalisation of the per-context covariances of the pair means | `--axes-init jd` / `axes_init` |
-| Activities | group lasso per (perturbation, context) pair, lambda = 0.0272, then least-squares refit on the selected programs | `--coding group_lasso --lasso-lambda 0.0272` |
+| Activities | group lasso per (perturbation, context) pair, lambda = 0.0272; the same activities are used by the discriminator and in the reconstruction objective | `--coding group_lasso --lasso-lambda 0.0272` |
 | Head | four statistics (z, z^2, \|z\|, tanh z) with a learned label-only normaliser c_k(p, c) | (the only head) |
 | Discriminator | binary; false examples = label swaps only, one per row | (the only negatives) |
 | Label network | MLP on [perturbation 64, context 8] embeddings, dropout 0.2, weight decay 0.01 | `--label-dropout 0.2 --label-weight-decay 0.01` |
